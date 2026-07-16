@@ -1,0 +1,36 @@
+openapi: 3.0.0
+info:
+  title: Example API
+  version: "1.0"
+paths:
+  /me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: OK
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getUser
+      responses:
+        "200":
+          description: OK
+    patch:
+      operationId: updateUser
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        "200":
+          description: OK
