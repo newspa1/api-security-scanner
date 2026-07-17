@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 import requests
 
-from apisec.checks.base import Finding, Severity
+from apisec.checks.base import Finding, ScanContext, Severity, concrete_url
 from apisec.spec_loader import Endpoint
 
 # Layer 1: sensitive-looking field names.
@@ -134,13 +134,13 @@ class ExcessiveDataExposureCheck:
     id = "API3:2023"
     title = "Excessive Data Exposure"
 
-    def run(self, endpoint: Endpoint, base_url: str, session: requests.Session) -> list[Finding]:
+    def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
         if endpoint.method != "GET":
             return []
 
-        url = _concrete_url(endpoint, base_url)
+        url = concrete_url(endpoint.path, ctx.base_url)
         try:
-            resp = session.get(url, timeout=5)
+            resp = ctx.session_a.get(url, timeout=5)
         except requests.RequestException:
             return []
         if resp.status_code >= 400:
@@ -171,13 +171,3 @@ class ExcessiveDataExposureCheck:
                 evidence=evidence,
             )
         ]
-
-
-def _concrete_url(endpoint: Endpoint, base_url: str) -> str:
-    """Substitute a placeholder value for path params so `/users/{id}` becomes a
-    requestable URL. Uses "1" — good enough for the MVP; Part 3 will discover a
-    real id owned by the test user."""
-    concrete_path = re.sub(r"\{[^}]+\}", "1", endpoint.path)
-    from urllib.parse import urljoin
-
-    return urljoin(base_url.rstrip("/") + "/", concrete_path.lstrip("/"))

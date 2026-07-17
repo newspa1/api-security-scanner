@@ -19,7 +19,7 @@ import json
 import jwt
 import requests
 
-from apisec.checks.base import Finding, Severity
+from apisec.checks.base import Finding, ScanContext, Severity
 from apisec.spec_loader import Endpoint
 
 
@@ -42,7 +42,8 @@ class BrokenAuthCheck:
     id = "API2:2023"
     title = "Broken Authentication - JWT alg=none bypass"
 
-    def run(self, endpoint: Endpoint, base_url: str, session: requests.Session) -> list[Finding]:
+    def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
+        session = ctx.session_a
         auth_header = session.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return []  # no bearer token configured, nothing to forge
@@ -52,7 +53,7 @@ class BrokenAuthCheck:
         if forged is None:
             return []
 
-        url = endpoint.url(base_url)
+        url = endpoint.url(ctx.base_url)
         forged_headers = {**session.headers, "Authorization": f"Bearer {forged}"}
         try:
             resp = session.request(endpoint.method, url, headers=forged_headers, timeout=5)

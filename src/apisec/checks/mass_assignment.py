@@ -17,9 +17,7 @@ Approach:
 
 from __future__ import annotations
 
-import requests
-
-from apisec.checks.base import Finding, Severity
+from apisec.checks.base import Finding, ScanContext, Severity
 from apisec.spec_loader import Endpoint
 
 
@@ -27,8 +25,9 @@ class MassAssignmentCheck:
     id = "API6:2023"
     title = "Mass Assignment"
 
-    def run(self, endpoint: Endpoint, base_url: str, session: requests.Session) -> list[Finding]:
+    def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
         if endpoint.method not in {"POST", "PUT", "PATCH"}:
             return []
-        # TODO: implement — see module docstring.
+        # TODO: implement — see module docstring. `ctx.session_a` and
+        # `apisec.checks.base.concrete_url` (id substitution) are ready to use.
         return []

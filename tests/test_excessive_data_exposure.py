@@ -6,7 +6,6 @@ against the demo API. This is the "correctness" half of the plan's per-part
 contract: prove it finds the true positive AND doesn't fire on clean data."""
 
 import pytest
-from fastapi.testclient import TestClient
 
 from apisec.checks.excessive_data_exposure import (
     ExcessiveDataExposureCheck,
@@ -17,8 +16,8 @@ from apisec.checks.excessive_data_exposure import (
     _shannon_entropy,
     _value_looks_secret,
 )
-from apisec.checks.base import Severity
-from apisec.scanner import scan
+from apisec.checks.base import ScanContext, Severity
+from apisec.spec_loader import Endpoint
 
 
 # ---- Layer 1: name heuristic --------------------------------------------------
@@ -92,52 +91,23 @@ def test_multiple_layers_raise_severity_to_high():
 
 
 # ---- Integration: against the live demo API ----------------------------------
+# Uses the shared `demo_sessions` fixture (tests/conftest.py), which logs the
+# two seeded demo users in and hands back TestClient-backed sessions.
 
-@pytest.fixture
-def demo_scan():
-    from demo_vulnerable_api.app import _reset_state, app
-
-    _reset_state()
-    client = TestClient(app)
-    token = client.post("/login", json={"username": "alice", "password": "alice-pw"}).json()[
-        "access_token"
-    ]
-    return client, token
-
-
-def test_integration_finds_password_hash_leak(monkeypatch, demo_scan):
-    client, token = demo_scan
-    # Point the scanner's requests at the in-process TestClient so no real server
-    # is needed. The check calls session.get(url); route it through the client.
-    from apisec.checks import excessive_data_exposure as eda
-
-    def fake_get(url, timeout=5, **kwargs):
-        path = url.replace("http://testserver", "")
-        return client.get(path, headers={"Authorization": f"Bearer {token}"})
-
-    check = eda.ExcessiveDataExposureCheck()
-
-    from apisec.spec_loader import Endpoint
-
+def test_integration_finds_password_hash_leak(demo_sessions):
+    session_a, _ = demo_sessions
+    ctx = ScanContext(base_url="http://testserver", session_a=session_a)
     ep = Endpoint(path="/users/{user_id}", method="GET", operation_id="read_user")
-    session = type("S", (), {"get": staticmethod(fake_get)})()
-    findings = check.run(ep, "http://testserver", session)
+    findings = ExcessiveDataExposureCheck().run(ep, ctx)
 
     assert len(findings) == 1
     assert findings[0].check_id == "API3:2023"
     assert "password_hash" in findings[0].evidence
 
 
-def test_integration_me_is_clean(demo_scan):
-    client, token = demo_scan
-    from apisec.checks import excessive_data_exposure as eda
-
-    def fake_get(url, timeout=5, **kwargs):
-        path = url.replace("http://testserver", "")
-        return client.get(path, headers={"Authorization": f"Bearer {token}"})
-
-    ep_type = __import__("apisec.spec_loader", fromlist=["Endpoint"]).Endpoint
-    ep = ep_type(path="/me", method="GET", operation_id="read_me")
-    session = type("S", (), {"get": staticmethod(fake_get)})()
-    findings = eda.ExcessiveDataExposureCheck().run(ep, "http://testserver", session)
+def test_integration_me_is_clean(demo_sessions):
+    session_a, _ = demo_sessions
+    ctx = ScanContext(base_url="http://testserver", session_a=session_a)
+    ep = Endpoint(path="/me", method="GET", operation_id="read_me")
+    findings = ExcessiveDataExposureCheck().run(ep, ctx)
     assert findings == []  # /me is deliberately clean -> no false positive
