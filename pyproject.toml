@@ -17,6 +17,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
+    # Demo vulnerable API (target for testing the scanner end-to-end).
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -37,3 +41,10 @@ packages = ["src/apisec"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+# The scanner package (apisec) is installed via `pip install -e`, but the
+# demo_vulnerable_api lives at the repo root as a test fixture (not shipped),
+# so add the root to the import path for tests.
+pythonpath = ["."]
+testpaths = ["tests"]
