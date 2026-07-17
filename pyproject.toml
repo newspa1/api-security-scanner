@@ -1,11 +1,11 @@
 [project]
 name = "apisec-scanner"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A lightweight scanner that tests REST APIs against the OWASP API Security Top 10"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Your Name" }]
+authors = [{ name = "Sleepcat" }]
 dependencies = [
     "requests>=2.31",
     "pyyaml>=6.0",
@@ -23,8 +23,14 @@ dev = [
 apisec = "apisec.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/apisec/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apisec"]
