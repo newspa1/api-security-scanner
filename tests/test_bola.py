@@ -256,6 +256,7 @@ def test_integration_full_scan_no_regression(demo_client, demo_sessions):
             findings.extend(check.run(ep, ctx))
 
     check_ids = {f.check_id for f in findings}
-    assert "API1:2023" in check_ids  # BOLA (new this part)
+    assert "API1:2023" in check_ids  # BOLA (Part 3)
     assert "API2:2023" in check_ids  # Broken Auth (Part 1, no regression)
     assert "API3:2023" in check_ids  # Excessive Data Exposure (Part 2, no regression)
+    assert "API6:2023" in check_ids  # Mass Assignment (Part 4, new this part)
