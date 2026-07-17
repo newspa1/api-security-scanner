@@ -51,6 +51,12 @@ def extract_endpoints(spec: dict) -> list[Endpoint]:
     for path, path_item in spec.get("paths", {}).items():
         shared_params = path_item.get("parameters", [])
         for method, operation in path_item.items():
+            # A path item mixes operation keys (get/post/...) with non-operation
+            # keys (parameters/summary/description/servers/$ref); this guard keeps
+            # only real HTTP verbs. We scope to the five verbs that carry the
+            # OWASP API Top 10 attack surface and deliberately omit head/options/
+            # trace for the MVP. Follow-up: add "trace" here + a check for it, since
+            # an endpoint accepting TRACE enables Cross-Site Tracing (XST).
             if method.lower() not in {"get", "post", "put", "patch", "delete"}:
                 continue
             endpoints.append(
