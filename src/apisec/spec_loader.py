@@ -18,6 +18,7 @@ class Endpoint:
     operation_id: str | None
     parameters: list[dict] = field(default_factory=list)
     request_body_schema: dict | None = None
+    response_schema: dict | None = None
     security: list[dict] = field(default_factory=list)
 
     def url(self, base_url: str) -> str:
@@ -65,11 +66,33 @@ def extract_endpoints(spec: dict) -> list[Endpoint]:
                     method=method.upper(),
                     operation_id=operation.get("operationId"),
                     parameters=shared_params + operation.get("parameters", []),
-                    request_body_schema=_extract_request_body_schema(operation),
+                    request_body_schema=_resolve_ref(
+                        _extract_request_body_schema(operation), spec
+                    ),
+                    response_schema=_extract_response_schema(operation, spec),
                     security=operation.get("security", spec.get("security", [])),
                 )
             )
     return endpoints
+
+
+def _resolve_ref(schema: dict | None, spec: dict) -> dict | None:
+    """Follow a top-level JSON-Pointer `$ref` (e.g. "#/components/schemas/User")
+    into the spec. FastAPI and most generators emit request/response bodies as
+    refs, so without this the schema is just `{"$ref": ...}` and unusable. Only
+    resolves one level and only local (`#/...`) refs — enough for typical specs.
+    """
+    if isinstance(schema, dict) and "$ref" in schema:
+        ref = schema["$ref"]
+        if ref.startswith("#/"):
+            node: object = spec
+            for part in ref[2:].split("/"):
+                if not isinstance(node, dict):
+                    return schema
+                node = node.get(part, {})
+            if isinstance(node, dict):
+                return node
+    return schema
 
 
 def _extract_request_body_schema(operation: dict) -> dict | None:
@@ -81,3 +104,19 @@ def _extract_request_body_schema(operation: dict) -> dict | None:
     if not json_content:
         return None
     return json_content.get("schema")
+
+
+def _extract_response_schema(operation: dict, spec: dict) -> dict | None:
+    """Schema of the primary success (2xx) JSON response, `$ref` resolved.
+    Used by the Excessive Data Exposure check to spot response fields the spec
+    never declared."""
+    responses = operation.get("responses", {})
+    success = responses.get("200") or next(
+        (responses[code] for code in responses if str(code).startswith("2")), None
+    )
+    if not success:
+        return None
+    json_content = success.get("content", {}).get("application/json")
+    if not json_content:
+        return None
+    return _resolve_ref(json_content.get("schema"), spec)
