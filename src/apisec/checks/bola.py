@@ -20,14 +20,29 @@ ALGORITHM (heuristic — read the limitation below before trusting a finding):
    two independently-authenticated identities can both reach the same object.
 
 LIMITATION (be upfront about this — it's a heuristic, not a proof): the check
-has no ground truth for who is *supposed* to own the resource. A legitimately
-shared/public resource (e.g. a public product listing) will trigger a false
-positive here, because "two users can both read it" looks identical to a real
-BOLA from the outside. Real BOLA scanners have the same limitation without
-domain knowledge of the target API — treat a finding as "worth a human
-review", not an automatic proof of a bug. This is also why a 403 for user B
-is NOT flagged: that's authorization working correctly, distinct from a 404
-(wrong id guess), which the check also doesn't flag.
+has no ground truth for who is *supposed* to own the resource. "Two users can
+both read this" looks identical from the outside whether the resource is
+illegitimately leaked OR legitimately shared/public — real BOLA scanners have
+the same limitation without domain knowledge of the target API. Treat a
+finding as "worth a human review", not an automatic proof of a bug. (A 403 for
+user B is NOT flagged: that's authorization working correctly, distinct from
+a 404 — wrong id guess — which the check also doesn't flag.)
+
+Two mitigations for the "legitimately public" false-positive class, each
+closing a DIFFERENT flavor of it:
+
+  1. SPEC-DECLARED public endpoints: if the OpenAPI spec explicitly marks an
+     operation `security: []` (no auth required at all — a real, standard
+     OpenAPI signal, distinct from the spec simply saying nothing about auth;
+     see spec_loader.Endpoint.security), skip it. "Two people can read a page
+     that needs no login" isn't a finding.
+  2. Endpoints that DO require auth but are intentionally shared with every
+     authenticated user (e.g. a public announcement) have no such signal in
+     OpenAPI — there's no schema construct for "no per-object ownership
+     applies here". That can't be inferred from behavior (the response is
+     identical either way), so it's closed the same way secret scanners close
+     unavoidable false positives: a human-maintained allowlist
+     (`ctx.public_paths`, wired from `--public-paths`), not detection.
 
 FOLLOW-UPS (not done): ids beyond simple sequential integers (UUIDs can't be
 guessed this way — would need `POST`ing a resource as user A first, noting
@@ -35,6 +50,8 @@ the id from the response, then testing B against it); write-based BOLA.
 """
 
 from __future__ import annotations
+
+import fnmatch
 
 import requests
 
@@ -55,6 +72,10 @@ class BolaCheck:
             return []
         if ctx.session_b is None:
             return []  # can't test cross-user access with only one identity
+        if endpoint.security == []:
+            return []  # spec explicitly declares this endpoint needs no auth
+        if _matches_public_path(endpoint.path, ctx.public_paths):
+            return []  # operator has declared this path intentionally shared
 
         for candidate_id in _CANDIDATE_IDS:
             url = concrete_url(endpoint.path, ctx.base_url, candidate_id)
@@ -102,3 +123,7 @@ class BolaCheck:
 
 def _has_id_path_param(path: str) -> bool:
     return "{" in path and "}" in path
+
+
+def _matches_public_path(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)

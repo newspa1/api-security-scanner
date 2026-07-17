@@ -41,3 +41,50 @@ def test_request_body_schema_is_extracted():
     endpoints = extract_endpoints(MINI_SPEC)
     update_user = next(e for e in endpoints if e.path == "/users/{id}" and e.method == "PUT")
     assert update_user.request_body_schema == {"type": "object", "properties": {"name": {}}}
+
+
+# ---- security extraction: three distinct states, not two ---------------------
+# (declared-public [] vs no-information-at-all None vs an actual scheme list)
+
+SECURITY_SPEC = {
+    "openapi": "3.0.0",
+    "paths": {
+        "/public": {"get": {"operationId": "getPublic", "security": [], "responses": {"200": {}}}},
+        "/protected": {
+            "get": {
+                "operationId": "getProtected",
+                "security": [{"bearerAuth": []}],
+                "responses": {"200": {}},
+            }
+        },
+        "/no-info": {"get": {"operationId": "getNoInfo", "responses": {"200": {}}}},
+        "/inherits-global": {"get": {"operationId": "getInherited", "responses": {"200": {}}}},
+    },
+}
+
+
+def test_explicit_empty_security_extracts_as_empty_list():
+    endpoints = extract_endpoints(SECURITY_SPEC)
+    ep = next(e for e in endpoints if e.path == "/public")
+    assert ep.security == []
+
+
+def test_explicit_scheme_is_extracted():
+    endpoints = extract_endpoints(SECURITY_SPEC)
+    ep = next(e for e in endpoints if e.path == "/protected")
+    assert ep.security == [{"bearerAuth": []}]
+
+
+def test_no_security_anywhere_extracts_as_none_not_empty_list():
+    # No operation-level `security`, and the spec declares no global default
+    # either -> genuinely "no information", must NOT collapse to [].
+    endpoints = extract_endpoints(SECURITY_SPEC)
+    ep = next(e for e in endpoints if e.path == "/no-info")
+    assert ep.security is None
+
+
+def test_operation_without_security_inherits_spec_global_default():
+    spec_with_global = {**SECURITY_SPEC, "security": [{"apiKeyAuth": []}]}
+    endpoints = extract_endpoints(spec_with_global)
+    ep = next(e for e in endpoints if e.path == "/inherits-global")
+    assert ep.security == [{"apiKeyAuth": []}]

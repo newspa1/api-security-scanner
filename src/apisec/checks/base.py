@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 from urllib.parse import urljoin
@@ -35,11 +35,19 @@ class ScanContext:
     present (the scanner's primary identity); `session_b` is only set when the
     caller supplied a second set of credentials (`--auth-header-b`), which is
     what BOLA needs to compare cross-user access. Checks that don't need a
-    second identity simply ignore `session_b`."""
+    second identity simply ignore `session_b`.
+
+    `public_paths` is an operator-supplied allowlist (`--public-paths`) of
+    glob patterns for endpoints known to be intentionally shared across users
+    -- e.g. a public product listing that requires login but isn't owned by
+    any one user. BOLA can't infer this from spec/traffic alone (see its
+    module docstring), so it's a human-declared escape hatch, same pattern as
+    a secret-scanner's baseline/allowlist file."""
 
     base_url: str
     session_a: requests.Session
     session_b: requests.Session | None = None
+    public_paths: list[str] = field(default_factory=list)
 
 
 class Check(Protocol):

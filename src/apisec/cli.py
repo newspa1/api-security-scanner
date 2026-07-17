@@ -22,14 +22,24 @@ def main(argv: list[str] | None = None) -> int:
         help="A second identity's Authorization header, e.g. \"Bearer eyJ...\". "
         "Enables cross-user checks (BOLA) that need two distinct accounts.",
     )
+    parser.add_argument(
+        "--public-paths",
+        help="Comma-separated glob patterns for endpoints known to be "
+        'intentionally shared across users, e.g. "/products/*,/announcements/*". '
+        "Suppresses BOLA findings on matching paths -- for resources that "
+        "require auth but have no per-object ownership model, which the "
+        "scanner can't infer on its own.",
+    )
     parser.add_argument("--json-out", help="Also write findings to this JSON file")
     args = parser.parse_args(argv)
 
+    public_paths = args.public_paths.split(",") if args.public_paths else None
     findings = scan(
         spec_path=args.spec,
         base_url=args.target,
         auth_header=args.auth_header,
         auth_header_b=args.auth_header_b,
+        public_paths=public_paths,
     )
     print_report(findings)
     if args.json_out:

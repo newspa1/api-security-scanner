@@ -124,6 +124,54 @@ def test_endpoint_without_id_param_is_skipped():
     assert BolaCheck().run(ep, ctx) == []
 
 
+# ---- false-positive mitigations: spec-declared public + --public-paths -------
+
+def test_spec_declared_public_endpoint_is_skipped():
+    # security == [] means the SPEC says no auth is needed here -- even though
+    # both fake sessions would "succeed", this must not be flagged.
+    ep = Endpoint(path="/things/{id}", method="GET", operation_id="get_thing", security=[])
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=_FakeSession({"http://x/things/1": 200}),
+        session_b=_FakeSession({"http://x/things/1": 200}),
+    )
+    assert BolaCheck().run(ep, ctx) == []
+
+
+def test_no_security_info_still_runs_normally():
+    # security is None (no info at all) -- must NOT be treated like [].
+    # Regression guard for the exact bug this feature could have introduced.
+    ep = Endpoint(path="/things/{id}", method="GET", operation_id="get_thing", security=None)
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=_FakeSession({"http://x/things/1": 200}),
+        session_b=_FakeSession({"http://x/things/1": 200}),
+    )
+    assert len(BolaCheck().run(ep, ctx)) == 1
+
+
+def test_public_paths_allowlist_suppresses_matching_endpoint():
+    ep = Endpoint(path="/announcements/{id}", method="GET", operation_id="get_announcement")
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=_FakeSession({"http://x/announcements/1": 200}),
+        session_b=_FakeSession({"http://x/announcements/1": 200}),
+        public_paths=["/announcements/*"],
+    )
+    assert BolaCheck().run(ep, ctx) == []
+
+
+def test_public_paths_allowlist_does_not_affect_unmatched_endpoints():
+    ep = Endpoint(path="/orders/{id}", method="GET", operation_id="get_order")
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=_FakeSession({"http://x/orders/1": 200}),
+        session_b=_FakeSession({"http://x/orders/1": 200}),
+        public_paths=["/announcements/*"],  # doesn't match /orders/*
+    )
+    assert len(BolaCheck().run(ep, ctx)) == 1
+
+
 # ---- integration: against the live demo API, two real identities -------------
 
 def test_integration_bola_on_users_endpoint(demo_sessions):
@@ -146,6 +194,49 @@ def test_integration_bola_on_orders_endpoint(demo_sessions):
 
     assert len(findings) == 1
     assert findings[0].check_id == "API1:2023"
+
+
+def test_integration_public_items_endpoint_not_flagged(demo_client, demo_sessions):
+    """/public/items/{item_id} is genuinely public (openapi_extra security=[]
+    in the demo app). Uses the REAL spec extraction, not a hand-built
+    Endpoint, so this proves the spec_loader fix end-to-end."""
+    session_a, session_b = demo_sessions
+    spec = demo_client.get("/openapi.json").json()
+    endpoints = extract_endpoints(spec)
+    ep = next(e for e in endpoints if e.path == "/public/items/{item_id}")
+    assert ep.security == []  # sanity: the spec really does declare this public
+
+    ctx = ScanContext(base_url="http://testserver", session_a=session_a, session_b=session_b)
+    assert BolaCheck().run(ep, ctx) == []
+
+
+def test_integration_announcements_flagged_without_allowlist(demo_sessions):
+    """/announcements/{id} requires auth but is intentionally shared -- with
+    NO --public-paths configured, this is an expected false positive (the
+    honest baseline behavior documented in bola.py)."""
+    session_a, session_b = demo_sessions
+    ctx = ScanContext(base_url="http://testserver", session_a=session_a, session_b=session_b)
+    ep = Endpoint(
+        path="/announcements/{announcement_id}", method="GET", operation_id="read_announcement"
+    )
+    findings = BolaCheck().run(ep, ctx)
+    assert len(findings) == 1
+
+
+def test_integration_announcements_suppressed_with_allowlist(demo_sessions):
+    """Same endpoint, same identities -- but with --public-paths declaring it
+    intentionally shared, the false positive is suppressed."""
+    session_a, session_b = demo_sessions
+    ctx = ScanContext(
+        base_url="http://testserver",
+        session_a=session_a,
+        session_b=session_b,
+        public_paths=["/announcements/*"],
+    )
+    ep = Endpoint(
+        path="/announcements/{announcement_id}", method="GET", operation_id="read_announcement"
+    )
+    assert BolaCheck().run(ep, ctx) == []
 
 
 def test_integration_full_scan_no_regression(demo_client, demo_sessions):

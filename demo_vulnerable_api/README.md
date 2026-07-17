@@ -46,3 +46,14 @@ Orders: order `1` belongs to user A, order `2` belongs to user B.
 Exposure check has exactly one true positive to find (`/users/{id}`).
 
 Each bug is marked with a `# VULNERABLE:` comment in `app.py`.
+
+## NOT vulnerabilities — false-positive test cases for BOLA
+
+Two endpoints are intentionally shared, not broken, and exist to prove BOLA
+doesn't cry wolf on legitimate sharing (each marked `# NOT a vulnerability:`
+in `app.py`):
+
+| Endpoint | Why it's fine | How the scanner recognizes it |
+|---|---|---|
+| `GET /public/items/{id}` | genuinely public, no auth at all | spec declares `security: []`; BOLA skips it automatically |
+| `GET /announcements/{id}` | requires login, but meant for every user | no spec signal exists for this — needs `--public-paths "/announcements/*"` to suppress |

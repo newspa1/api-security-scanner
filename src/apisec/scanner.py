@@ -12,6 +12,7 @@ def scan(
     base_url: str,
     auth_header: str | None = None,
     auth_header_b: str | None = None,
+    public_paths: list[str] | None = None,
 ) -> list[Finding]:
     spec = load_spec(spec_path)
     endpoints = extract_endpoints(spec)
@@ -25,7 +26,12 @@ def scan(
         session_b = requests.Session()
         session_b.headers["Authorization"] = auth_header_b
 
-    ctx = ScanContext(base_url=base_url, session_a=session_a, session_b=session_b)
+    ctx = ScanContext(
+        base_url=base_url,
+        session_a=session_a,
+        session_b=session_b,
+        public_paths=public_paths or [],
+    )
 
     findings: list[Finding] = []
     for endpoint in endpoints:

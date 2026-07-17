@@ -46,6 +46,11 @@ _SEED_ORDERS = {
     1: {"id": 1, "user_id": 1, "item": "Widget", "amount": 42.0},
     2: {"id": 2, "user_id": 2, "item": "Gadget", "amount": 13.5},
 }
+# Read-only reference data for the two NOT-a-vulnerability endpoints below
+# (/public/items and /announcements) -- these exist to prove the scanner
+# doesn't false-positive on legitimately shared resources, not to be broken.
+_ITEMS = {1: {"id": 1, "name": "Widget"}, 2: {"id": 2, "name": "Gadget"}}
+_ANNOUNCEMENTS = {1: {"id": 1, "title": "Welcome", "body": "Visible to every logged-in user."}}
 
 USERS: dict[int, dict] = {}
 ORDERS: dict[int, dict] = {}
@@ -139,6 +144,30 @@ def read_order(order_id: int, current: dict = Depends(get_current_user)) -> dict
         raise HTTPException(status_code=404, detail="order not found")
     # VULNERABLE (BOLA): any authenticated user can read any order.
     return order
+
+
+@app.get("/public/items/{item_id}", openapi_extra={"security": []})
+def read_public_item(item_id: int) -> dict:
+    # NOT a vulnerability: genuinely public, no auth at all -- no
+    # Depends(get_current_user) here, and `openapi_extra` declares that in the
+    # spec (security: []) so the scanner's BOLA check can recognize it and
+    # skip, instead of flagging "two users can both read this."
+    item = _ITEMS.get(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="item not found")
+    return item
+
+
+@app.get("/announcements/{announcement_id}")
+def read_announcement(announcement_id: int, current: dict = Depends(get_current_user)) -> dict:
+    # NOT a vulnerability: requires login, but intentionally shared with every
+    # authenticated user -- there's no OpenAPI signal for "no ownership model
+    # applies here," so this is the case that needs --public-paths rather than
+    # anything the scanner can infer on its own.
+    announcement = _ANNOUNCEMENTS.get(announcement_id)
+    if announcement is None:
+        raise HTTPException(status_code=404, detail="announcement not found")
+    return announcement
 
 
 @app.patch("/users/{user_id}")

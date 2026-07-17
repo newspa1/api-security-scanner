@@ -19,7 +19,15 @@ class Endpoint:
     parameters: list[dict] = field(default_factory=list)
     request_body_schema: dict | None = None
     response_schema: dict | None = None
-    security: list[dict] = field(default_factory=list)
+    # Three distinct states, not two: an explicit [] means the spec DECLARES
+    # this operation needs no auth (a real signal); None means the spec says
+    # NOTHING about auth here (common when a framework doesn't emit OpenAPI
+    # security metadata, e.g. FastAPI with a plain Header() instead of its
+    # Security()/HTTPBearer classes) -- collapsing these into one default (as
+    # this used to do, defaulting to []) makes "declared public" and "unknown"
+    # indistinguishable, which is wrong for anything that trusts that signal
+    # (see checks/bola.py's use of this field).
+    security: list[dict] | None = None
 
     def url(self, base_url: str) -> str:
         return urljoin(base_url.rstrip("/") + "/", self.path.lstrip("/"))
@@ -70,7 +78,13 @@ def extract_endpoints(spec: dict) -> list[Endpoint]:
                         _extract_request_body_schema(operation), spec
                     ),
                     response_schema=_extract_response_schema(operation, spec),
-                    security=operation.get("security", spec.get("security", [])),
+                    # No `[]` fallback here on purpose -- see the Endpoint.security
+                    # docstring above. dict.get only falls back when the key is
+                    # MISSING, so an operation that explicitly writes
+                    # `security: []` still yields [], while one that never
+                    # mentions security at all (and the spec has no global
+                    # default either) yields None, not [].
+                    security=operation.get("security", spec.get("security")),
                 )
             )
     return endpoints
