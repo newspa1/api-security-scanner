@@ -1,8 +1,7 @@
-"""Correctness tests for demo_apps/secure -- the control group. Two layers:
-(1) the app itself behaves as designed (each fix actually works), and (2)
-running the REAL scanner (ALL_CHECKS) against it produces zero findings.
-That second layer is the part that actually proves "the scanner doesn't cry
-wolf on secure code" as an automated, re-checkable fact, not just a claim.
+"""Correctness tests for demo_apps/secure -- the control group: proves each
+individual fix actually works (this file). Whether the REAL scanner agrees
+and finds zero findings overall is covered once, alongside the other three
+targets, in test_scan_all_targets.py -- no need to duplicate that here.
 """
 
 from __future__ import annotations
@@ -13,10 +12,7 @@ import json
 import jwt
 import pytest
 
-from apisec.checks import ALL_CHECKS
-from apisec.checks.base import ScanContext
-from apisec.spec_loader import extract_endpoints
-from demo_apps.secure.app import SECRET_KEY, _reset_state, app
+from demo_apps.secure.app import _reset_state, app
 
 
 @pytest.fixture
@@ -65,16 +61,3 @@ def test_patch_me_ignores_undeclared_role_field(secure_app_sessions):
     client.patch("/me", headers=session_a.headers, json={"name": "Alice X", "role": "admin"})
     body = client.get("/me", headers=session_a.headers).json()
     assert "role" not in body
-
-
-# ---- the real scanner, run against this app, finds NOTHING -------------------
-
-def test_full_scan_finds_zero_vulnerabilities(secure_app_sessions):
-    client, (session_a, session_b) = secure_app_sessions
-    spec = client.get("/openapi.json").json()
-    endpoints = extract_endpoints(spec)
-    ctx = ScanContext(base_url="http://testserver", session_a=session_a, session_b=session_b)
-
-    findings = [f for ep in endpoints for check in ALL_CHECKS for f in check.run(ep, ctx)]
-
-    assert findings == []

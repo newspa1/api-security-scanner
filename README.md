@@ -77,9 +77,7 @@ across users — is correctly *not* flagged, because it was passed via
 ## Example targets
 
 Four small FastAPI apps to scan, each demonstrating a different, exact,
-predictable outcome — every claim below is enforced by a test that runs the
-real scanner and asserts the exact result (`tests/test_demo_*.py`), not just
-described in prose.
+predictable outcome.
 
 | Target | Port | Planted bug(s) | Expected scan outcome |
 |---|---|---|---|
@@ -88,8 +86,49 @@ described in prose.
 | `demo_apps/bola_only` | 8002 | missing ownership check on `GET /orders/{id}` | **exactly 1 finding**: `API1:2023` |
 | `demo_apps/mass_assignment_only` | 8003 | `PATCH /me` applies undeclared fields | **exactly 1 finding**: `API3:2023` |
 
-Run any of them the same way — start it, log in as both seed users
-(`alice`/`alice-pw`, `bob`/`bob-pw`), then scan:
+### The fastest way to see all four compared: one test command
+
+`tests/test_scan_all_targets.py` runs the exact same scan against all four
+targets and prints what it found, before asserting it's exactly what's
+claimed above — so the comparison isn't just a table in this README, it's a
+live, re-checkable command:
+
+```bash
+pytest tests/test_scan_all_targets.py -v -s
+```
+
+```
+tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[vulnerable]
+Demo Vulnerable API: 5 finding(s)
+  [CRITICAL] API2:2023 Broken Authentication - JWT alg=none bypass -- GET /me
+  [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /users/{user_id}
+  [HIGH    ] API3:2023 Excessive Data Exposure -- GET /users/{user_id}
+  [HIGH    ] API3:2023 Mass Assignment -- PATCH /users/{user_id}
+  [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /orders/{order_id}
+PASSED
+tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[secure]
+Demo Secure API: 0 finding(s)
+  (none)
+PASSED
+tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[bola_only]
+Demo BOLA-Only API: 1 finding(s)
+  [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /orders/{order_id}
+PASSED
+tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[mass_assignment_only]
+Demo Mass-Assignment-Only API: 1 finding(s)
+  [HIGH    ] API3:2023 Mass Assignment -- PATCH /me
+PASSED
+```
+
+`-v` shows one line per target; `-s` un-hides the `print()` output pytest
+normally captures, so what you see above is the actual findings, not just
+green checkmarks. `-s` alone (without `-v`) also works if you just want the
+findings without the per-test pass/fail noise.
+
+### Or drive it by hand against a real running server
+
+Start one, log in as both seed users (`alice`/`alice-pw`, `bob`/`bob-pw`),
+then scan:
 
 ```bash
 # pick one:

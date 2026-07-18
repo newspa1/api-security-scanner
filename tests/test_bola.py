@@ -3,9 +3,10 @@
 Split into: (1) the shared id-substitution helper, (2) the BOLA decision logic
 in isolation using fake sessions with canned status codes (no network / no
 demo API needed — this is what proves the "2xx-as-user-B => finding" logic
-and the 404-vs-403 distinction from the plan), (3) an integration test against
-the live demo API with two real identities, and (4) a full-scan regression
-check that Part 1/2 findings still work after the ScanContext refactor.
+and the 404-vs-403 distinction from the plan), and (3) integration tests
+against the live demo API with two real identities. A full ALL_CHECKS
+regression scan (proving no other check broke) lives in
+test_scan_all_targets.py, alongside the other demo targets.
 """
 
 from __future__ import annotations
@@ -239,32 +240,8 @@ def test_integration_announcements_suppressed_with_allowlist(demo_sessions):
     assert BolaCheck().run(ep, ctx) == []
 
 
-def test_integration_full_scan_no_regression(demo_client, demo_sessions):
-    """Drives ALL_CHECKS (the ScanContext refactor touched every one of them)
-    against the demo API with two identities, confirming BOLA now fires
-    alongside the Part 1/2 findings with no regressions from the refactor."""
-    from apisec.checks import ALL_CHECKS
-
-    session_a, session_b = demo_sessions
-    spec = demo_client.get("/openapi.json").json()
-    endpoints = extract_endpoints(spec)
-    ctx = ScanContext(base_url="http://testserver", session_a=session_a, session_b=session_b)
-
-    findings = []
-    for ep in endpoints:
-        for check in ALL_CHECKS:
-            findings.extend(check.run(ep, ctx))
-
-    check_ids = {f.check_id for f in findings}
-    assert "API1:2023" in check_ids  # BOLA (Part 3)
-    assert "API2:2023" in check_ids  # Broken Auth (Part 1, no regression)
-
-    # Excessive Data Exposure and Mass Assignment are DIFFERENT checks that
-    # both correctly report under the same OWASP id (API3:2023 -- OWASP
-    # merged these two in the 2023 revision, see mass_assignment.py's
-    # docstring). A plain "API3:2023 in check_ids" would pass even if Mass
-    # Assignment silently stopped firing, since EDE alone satisfies it --
-    # check both titles are actually present.
-    api3_titles = {f.title for f in findings if f.check_id == "API3:2023"}
-    assert "Excessive Data Exposure" in api3_titles  # Part 2, no regression
-    assert "Mass Assignment" in api3_titles  # Part 4, new this part
+# A full ALL_CHECKS scan against the vulnerable demo (proving BOLA fires
+# alongside Part 1/2's findings with no regression from the ScanContext
+# refactor) is covered once, precisely (exact count + exact bug-type
+# fingerprint, catching the API3:2023-shared-id case too), alongside the
+# other three demo targets, in test_scan_all_targets.py.
