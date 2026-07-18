@@ -18,9 +18,9 @@ breaks."
 | Check | OWASP ID | Status |
 |---|---|---|
 | Broken Authentication (JWT `alg=none`) | API2:2023 | ✅ implemented |
-| Broken Object Level Authorization (BOLA) | API1:2023 | ⏳ stub — Week 2 |
-| Mass Assignment | API3:2023 | ⏳ stub — Week 3 |
-| Excessive Data Exposure | API3:2023 | ⏳ stub — Week 3-4 |
+| Broken Object Level Authorization (BOLA) | API1:2023 | ✅ implemented |
+| Mass Assignment | API3:2023 | ✅ implemented |
+| Excessive Data Exposure | API3:2023 | ✅ implemented |
 
 > Mass Assignment and Excessive Data Exposure intentionally share OWASP id
 > API3:2023 ("Broken Object Property Level Authorization") — OWASP merged
@@ -29,8 +29,11 @@ breaks."
 > scanner reports them as two distinct checks under that shared id,
 > distinguished by `title`.
 
-See each module in `src/apisec/checks/` for the implementation plan —
-every stub has a docstring describing the exact approach.
+All four checks are validated against `demo_vulnerable_api/` — an
+intentionally vulnerable FastAPI app with one planted bug per check (see its
+own README). See each module in `src/apisec/checks/` for the detection
+approach — every check's docstring documents its algorithm, scope decisions,
+and known limitations (each is a heuristic, not a formal proof).
 
 ## Quickstart
 
@@ -69,16 +72,18 @@ Adding a new check means implementing the `Check` protocol (`id`, `title`,
 
 ## Roadmap
 
-**MVP (weeks 1-6)**
+**MVP** ✅ done
 - [x] Repo scaffold, spec loader, CLI, reference check (JWT `alg=none`)
-- [ ] Implement BOLA check (needs two-user auth support in `scanner.py`)
-- [ ] Implement Mass Assignment check
-- [ ] Implement Excessive Data Exposure check
-- [ ] Build `demo_vulnerable_api/` (FastAPI app with one bug per check) to
+- [x] Implement BOLA check (two-user auth support via `ScanContext`)
+- [x] Implement Mass Assignment check
+- [x] Implement Excessive Data Exposure check (hybrid: name + value-shape/entropy + schema conformance)
+- [x] Build `demo_vulnerable_api/` (FastAPI app with one bug per check) to
       validate each check catches its target vulnerability
+- [x] `--public-paths` allowlist + spec-declared-public detection, to keep
+      BOLA's false-positive rate honest on legitimately shared resources
 
-**Stretch (weeks 7-10)**
-- [ ] GitHub Action so the scanner can run in CI against a preview deploy
+**Stretch**
+- [ ] GitHub Action so the scanner can run in CI against the demo API
 - [ ] Simple web dashboard for scan results
 - [ ] Record a demo: scan `demo_vulnerable_api`, walk through each finding
 
