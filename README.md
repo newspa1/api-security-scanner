@@ -35,16 +35,69 @@ Every check is a heuristic, not a formal proof — each module's docstring in
 `src/apisec/checks/` documents its algorithm, what it deliberately doesn't
 attempt, and its known false-positive classes.
 
-## Scan your own API
+## Quickstart
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-You need: your API's OpenAPI spec (a URL or local file), your API's base
-URL, and a valid auth token — two, if you want BOLA tested (a second
-account, since BOLA is inherently about comparing what two different users
-can each reach).
+### Try it against a real API first
+
+Rather than take it on faith, try the scanner against a real, well-known
+target before pointing it at your own API. [VAmPI](https://github.com/erev0s/VAmPI)
+is a small, MIT-licensed Flask API built specifically to evaluate tools like
+this one — a good five-minute sanity check:
+
+```bash
+git clone https://github.com/erev0s/VAmPI.git && cd VAmPI
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+vulnerable=1 python3 app.py &          # runs on :5000
+
+curl -s http://localhost:5000/createdb  # seed the database
+
+curl -s -X POST http://localhost:5000/users/v1/register -H 'Content-Type: application/json' \
+  -d '{"username":"scanuser1","password":"ScanPass1!","email":"a@tempmail.com"}'
+curl -s -X POST http://localhost:5000/users/v1/register -H 'Content-Type: application/json' \
+  -d '{"username":"scanuser2","password":"ScanPass2!","email":"b@tempmail.com"}'
+
+TOKEN_A=$(curl -s -X POST http://localhost:5000/users/v1/login -H 'Content-Type: application/json' -d '{"username":"scanuser1","password":"ScanPass1!"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['auth_token'])")
+TOKEN_B=$(curl -s -X POST http://localhost:5000/users/v1/login -H 'Content-Type: application/json' -d '{"username":"scanuser2","password":"ScanPass2!"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['auth_token'])")
+
+# from wherever apisec-scanner is installed:
+apisec --spec http://localhost:5000/openapi.json --target http://localhost:5000 \
+  --auth-header "Bearer $TOKEN_A" --auth-header-b "Bearer $TOKEN_B"
+```
+
+Real, current output:
+
+```
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+┃ Severity ┃ Check             ┃ Method ┃ Endpoint         ┃ Description       ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩
+│ MEDIUM   │ API3:2023         │ GET    │ /users/v1/_debug │ The response      │
+│          │ Excessive Data    │        │                  │ exposes fields    │
+│          │ Exposure          │        │                  │ that look         │
+│          │                   │        │                  │ sensitive.        │
+└──────────┴───────────────────┴────────┴──────────────────┴───────────────────┘
+```
+
+That's a real, unauthenticated password leak in VAmPI's `/users/v1/_debug`
+endpoint — exit code `0` because this one scores `MEDIUM`, not `HIGH`/`CRITICAL`.
+**This isn't the whole story on purpose:** `apisec` also misses two more
+severe, confirmed-exploitable bugs in this same target (an account-takeover
+BOLA and a registration-time privilege escalation). See
+[`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md) for the full write-up —
+hits, misses, and two real scanner bugs that were found and fixed as a
+direct result of this exercise. A tool that only ever reports clean sweeps
+against itself isn't proving much; this one's report card is public.
+
+### Now scan your own API
+
+Same shape, pointed at your own target. You need: your API's OpenAPI spec (a
+URL or local file), your API's base URL, and a valid auth token — two, if
+you want BOLA tested (a second account, since BOLA is inherently about
+comparing what two different users can each reach).
 
 ```bash
 apisec --spec https://your-api.example.com/openapi.json \
@@ -74,29 +127,9 @@ into CI to fail a build on a real finding, the same way this repo's own
 **A note on scope:** only scan APIs you own or are explicitly authorized to
 test. `--auth-header-b` requires you to already hold valid credentials for a
 second account you control — the scanner never tries to create or guess
-one.
-
-## Validated against a real API, not just our own
-
-A self-built demo proves the scanner catches what it was told to catch; it
-says nothing about whether it generalizes. `apisec` has also been run
-against [VAmPI](https://github.com/erev0s/VAmPI), an independent,
-third-party vulnerable API project, and graded against *its own* documented
-bug list — including two real false positives that were found and
-permanently fixed as a direct result. See
-[`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md) for the full, honest
-write-up (hits, misses, and fixes, not just a hit count).
-
-## Developing / testing this scanner itself
-
-```bash
-pytest
-```
-
-The checks themselves are validated against a set of purpose-built demo
-targets (one bug per check, a zero-bug control group, etc.) — see
-[`demo_apps/README.md`](demo_apps/README.md) if you want to see that proof,
-reproduce it, or add a new check.
+one. Also worth knowing: `apisec` assumes `GET` requests are safe/read-only,
+per HTTP convention — if your API has a `GET` endpoint with real side
+effects (VAmPI's `/createdb` does), a full scan will trigger it.
 
 ## Architecture
 
@@ -111,8 +144,6 @@ src/apisec/
     bola.py           # API1 — two-identity cross-access diff
     mass_assignment.py         # API3 (write facet) — undeclared-field injection
     excessive_data_exposure.py # API3 (read facet) — hybrid 3-layer detection
-demo_apps/            # targets used to develop/validate the checks -- see demo_apps/README.md
-.github/workflows/scan.yml  # CI: pytest, then the scanner against demo_apps/vulnerable
 ```
 
 Adding a new check means implementing the `Check` protocol (`id`, `title`,
@@ -138,19 +169,27 @@ A few decisions worth knowing about if you're reading the code:
 - **A rejected write/read is never treated as "safe."** Both BOLA and Mass
   Assignment treat a 4xx as "no evidence either way" and keep looking, rather
   than concluding an endpoint is secure from one failed probe.
+- **BOLA and Mass Assignment currently only guess sequential-integer ids**
+  (`"1".."5"`), not UUIDs or usernames — a known, documented scope boundary
+  that has a confirmed real cost, not just a theoretical one. See
+  [`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md).
 
 ## Roadmap
 
-**MVP** ✅ done — all four checks implemented and validated (self-built
-demos + an external, independent API). `--public-paths` allowlist keeps
-BOLA's false-positive rate honest on legitimately shared resources. CI runs
-the full suite plus a live two-directional scan gate on every push.
+**MVP** ✅ done — all four checks implemented and validated, including
+against an independent third-party API (see `EXTERNAL_VALIDATION.md`).
+`--public-paths` allowlist keeps BOLA's false-positive rate honest on
+legitimately shared resources. CI runs the full suite plus a live
+two-directional scan gate on every push.
 
 **Stretch**
 - [ ] Id *discovery* (not guessing) for BOLA/Mass Assignment, so they can
       test UUID- or username-keyed resources, not just sequential integers
+      — confirmed necessary, not just theoretical (`EXTERNAL_VALIDATION.md`)
+- [ ] Mass Assignment on `POST` (resource creation), not just `PATCH`/`PUT`
+- [ ] Re-weight finding severity by reachability (e.g. no-auth-required),
+      not just detection-signal count
 - [ ] Simple web dashboard for scan results
-- [ ] Record a demo video walking through each finding
 
 ## License
 

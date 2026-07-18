@@ -126,6 +126,67 @@ against this class of API. Fixing it for real means id *discovery*
 (register a resource as user A, read the real id back from the response)
 rather than id *guessing* — a bigger change, not attempted in this pass.
 
+### 4b. Two independent follow-up passes confirmed §4 is worse than it first looked
+
+Two separate agents later re-tested this project independently (each was
+asked to validate against a *different* well-known API — OWASP crAPI and
+OWASP DevSlop's Pixi — and both had to fall back to VAmPI: Pixi turned out
+to be an abandoned project with no OpenAPI spec, and crAPI requires Docker
+Compose, unavailable in this sandbox). Rather than just re-confirming §4,
+both manually exploited it end-to-end:
+
+- **Full account takeover, confirmed working.** `PUT /users/v1/{username}/password`
+  has no ownership check. As user B, changing user A's password
+  (`204 No Content`) and then logging in as A with the new password
+  succeeded — a real, complete account takeover, not a theoretical gap.
+  This is VAmPI's documented "Unauthorized Password Change" bug, and it's
+  the same root cause as §4 (`mass_assignment.py`'s write attempt used
+  `concrete_url`'s default placeholder id `"1"`, not a real username, so
+  every write attempt 400'd and the check correctly-but-uselessly stayed
+  silent).
+- **A worse, previously-undocumented gap: privilege escalation at
+  registration.** `POST /users/v1/register` silently accepts an undeclared
+  `"admin": true` field — a brand-new account registered this way gets
+  instant admin rights, confirmed by using it to perform an admin-only
+  `DELETE` on another user's account. `mass_assignment.py` explicitly
+  excludes `POST` from its scope (see its module docstring — a documented
+  MVP decision, not an oversight), so this was structurally invisible to
+  it. This is a more severe finding than anything in §4: it doesn't need
+  a second identity, a candidate id, or any of BOLA's machinery — just a
+  single crafted registration request.
+
+Net effect: `apisec` currently misses VAmPI's two most severe, most
+directly exploitable bugs (self-registered admin; cross-user account
+takeover) while correctly catching the one it's structurally built to
+catch (the unauthenticated debug leak, §1) and correctly staying silent on
+what it's not built to catch (§5). Both gaps trace to the same two design
+decisions — integer-only id guessing, and POST excluded from Mass
+Assignment — both already documented as MVP scope boundaries, now with
+concrete proof of what they cost in a real API.
+
+### 4c. A legitimate critique of the severity model
+
+One of the follow-up passes raised a good point about §1: an *unauthenticated*
+endpoint dumping every user's plaintext password (including admin's) only
+scores `MEDIUM`, because `excessive_data_exposure.py`'s severity model
+counts corroborating *detection signals* (name match, value shape, schema
+absence), not real-world *impact* — it has no notion of "reachable with
+zero auth," which is arguably the single biggest severity multiplier in
+practice. Worth reconsidering the scoring model; not changed in this pass.
+
+### 4d. Side effect worth knowing about: `GET /createdb` is not read-only
+
+VAmPI's spec lists `GET /createdb` as an ordinary operation, but calling it
+actually wipes and reseeds the entire user database — a real violation of
+HTTP's "GET should be safe" convention. Since `apisec`'s Excessive Data
+Exposure check GETs every spec-declared path, running a full scan against
+VAmPI has the side effect of resetting it mid-scan (confirmed: accounts
+registered before a scan were gone afterward). This isn't a scanner bug —
+`apisec` is doing exactly what a GET is supposed to be safe to do — but
+it's a sharp edge worth knowing before pointing this tool at any API that
+doesn't honor GET-safety, and a reason to prefer disposable/seeded test
+accounts over ones you care about persisting.
+
 ### 5. Out of scope, correctly not claimed
 
 VAmPI's remaining documented bugs — SQL injection, user/password
@@ -142,28 +203,42 @@ implements. Not finding it is correct, not a miss.
 
 | VAmPI's documented bug | Result | Why |
 |---|---|---|
-| Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** | True positive, first try |
+| Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (MEDIUM — arguably under-scored, §4c) | True positive, first try |
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
-| BOLA (`/users/v1/{username}`) | ❌ **Missed** | Candidate-id guessing (1-5) doesn't fit username keys |
-| Mass Assignment (`/users/v1/{username}/email`) | ❌ **Missed** | Same root cause as above |
+| Unauthorized password change (account takeover) | ❌ **Missed** — confirmed exploitable | Candidate-id guessing (1-5) doesn't fit username keys |
+| Registration-time privilege escalation (`admin: true`) | ❌ **Missed** — confirmed exploitable | Mass Assignment excludes POST by design (MVP scope) |
+| BOLA (`/users/v1/{username}` reads) | ❌ **Missed** | Same id-guessing root cause |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
 
-**Net result:** one correct true positive, two real scanner bugs found and
-permanently fixed, one confirmed and clearly-scoped limitation, zero false
-claims about categories the tool doesn't attempt. That's a more credible
-outcome than a clean sweep would have been — it's evidence the tool was
-actually tested against something it wasn't built to pass, not just
-polished against its own reflection.
+**Net result:** one correct true positive (with a fair question about its
+severity score), two real scanner bugs found and permanently fixed, and two
+confirmed, exploitable misses tracing to two already-documented MVP scope
+boundaries (integer-only id guessing; POST excluded from Mass Assignment).
+That's a more credible outcome than a clean sweep would have been — it's
+evidence the tool was actually tested against something it wasn't built to
+pass, including by independent follow-up passes that went as far as
+demonstrating working exploits the scanner misses, not just polished
+against its own reflection.
 
 ## Future work
 
 - **Id discovery instead of id guessing** for BOLA/Mass Assignment (register
   or create a resource as user A, read its real id back from the response)
-  — would close the gap found in §4, and generalizes beyond VAmPI to any
-  UUID- or slug-keyed API.
-- **[OWASP crAPI](https://github.com/OWASP/crAPI)** — a larger,
-  microservices-based vulnerable API (Docker Compose, mail server, multiple
-  services) covering the same OWASP API Top 10 categories at more realistic
-  scale. Not attempted here; a natural next external-validation target.
+  — would close the account-takeover and BOLA gaps above, and generalizes
+  beyond VAmPI to any UUID- or slug-keyed API.
+- **Mass Assignment on POST** (resource creation) — would close the
+  registration privilege-escalation gap above. Needs a way to find the
+  created resource back (response body or `Location` header), a different
+  problem from "read the same URL," which is why it was deferred originally.
+- **Re-weight severity by reachability**, not just detection-signal count
+  (§4c) — an unauthenticated leak should plausibly outscore an
+  authenticated one with otherwise-identical evidence.
+- **[OWASP crAPI](https://github.com/OWASP/crAPI)** — attempted twice
+  (independently) as a second external-validation target; both attempts
+  correctly detected that Docker Compose is required and unavailable in
+  this environment, and safely declined rather than forcing it. Remains a
+  natural next target in an environment with Docker access. OWASP DevSlop's
+  Pixi was also attempted and ruled out for good reason: the project is
+  explicitly marked unsupported/abandoned and ships no OpenAPI spec.

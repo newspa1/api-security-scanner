@@ -1,10 +1,12 @@
-# Demo Apps — How This Scanner Is Tested On Itself
+# Demo Apps — Internal CI Fixtures, Not User Examples
 
-This directory holds the target APIs used to develop and validate
-`apisec`'s checks. If you just want to scan **your own** API, you don't need
-anything here — see the main [README](../README.md). This doc is for anyone
-who wants to see proof the checks work, reproduce that proof, or extend the
-scanner with a new check.
+This directory holds the target APIs used to develop, unit-test, and
+regression-guard `apisec`'s checks in CI. **It is not documentation for
+using the scanner** — if you want to scan your own API, or see the scanner
+demonstrated against a real, independent project, see the main
+[README](../README.md) and [`EXTERNAL_VALIDATION.md`](../EXTERNAL_VALIDATION.md)
+instead. This doc is for contributors: anyone who wants to see proof the
+checks work, reproduce that proof, or add a new check.
 
 ## The four targets
 

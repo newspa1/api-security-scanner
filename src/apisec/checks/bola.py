@@ -47,6 +47,16 @@ closing a DIFFERENT flavor of it:
 FOLLOW-UPS (not done): ids beyond simple sequential integers (UUIDs can't be
 guessed this way — would need `POST`ing a resource as user A first, noting
 the id from the response, then testing B against it); write-based BOLA.
+
+CONFIRMED COST of these follow-ups (external validation against VAmPI,
+github.com/erev0s/VAmPI, see EXTERNAL_VALIDATION.md #4b): VAmPI keys users
+by username, not integers, so this check's `["1".."5"]` candidate list never
+finds an accessible resource there -- and `PUT /users/v1/{username}/password`
+has no ownership check at all, letting one user change another's password
+and take over their account. Manually confirmed exploitable (full account
+takeover). Both follow-ups above (id discovery, write-based BOLA) would be
+needed to catch this specific bug; upgrades it from a hypothetical gap to a
+confirmed, prioritized one.
 """
 
 from __future__ import annotations

@@ -28,6 +28,15 @@ different URL than the collection endpoint, and finding it back requires
 parsing the response for an id (or a Location header) -- a real follow-up,
 not done here.
 
+CONFIRMED COST of the POST exclusion (external validation against VAmPI,
+github.com/erev0s/VAmPI, see EXTERNAL_VALIDATION.md #4b): VAmPI's
+`POST /users/v1/register` silently accepts an undeclared `admin: true`
+field, granting instant admin rights on account creation -- a real,
+directly exploitable privilege escalation this check cannot see, precisely
+because it's a POST. This didn't change the SCOPE decision (still a bigger
+change than this pass), but it upgrades "a real follow-up" from
+hypothetical to confirmed-and-prioritized.
+
 Like BOLA, this is deliberately conservative: a request that just gets
 rejected outright isn't treated as "not vulnerable", it's treated as "no
 evidence either way" and skipped, so the check stays quiet rather than
