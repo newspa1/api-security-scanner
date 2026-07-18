@@ -54,6 +54,20 @@ def test_layer2_ignores_normal_values():
     assert _value_looks_secret(42) is None
 
 
+def test_layer2_ignores_long_varied_prose_despite_high_entropy():
+    # Real false positive found scanning VAmPI (github.com/erev0s/VAmPI): a
+    # long, varied English sentence trips the raw entropy threshold. Real
+    # secrets never contain whitespace; this sentence obviously does.
+    sentence = (
+        "VAmPI is a vulnerable on purpose API. It was created in order to "
+        "evaluate the efficiency of third party tools in identifying "
+        "vulnerabilities in APIs but it can also be used in learning/teaching "
+        "purposes."
+    )
+    assert _shannon_entropy(sentence) >= 4.0  # sanity: this WOULD trip raw entropy
+    assert _value_looks_secret(sentence) is None
+
+
 def test_shannon_entropy_ordering():
     assert _shannon_entropy("aaaaaaaa") < _shannon_entropy("A9f4Q2xZ7bV1kP0w")
 

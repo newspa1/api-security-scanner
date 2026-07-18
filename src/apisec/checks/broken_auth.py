@@ -14,6 +14,20 @@ declares needs no auth at all will trivially "accept" a forged token too
 (it accepts ANY token, or none), which isn't a bypass of anything -- there
 was no signature verification to bypass in the first place. Same false
 positive class BOLA has to guard against, same fix.
+
+BASELINE CHECK (added after external validation against VAmPI,
+github.com/erev0s/VAmPI): the `security == []` guard only helps when the
+spec actually declares it. Many real specs declare NOTHING either way
+(security is None, not []) on endpoints that in fact require no auth at
+all -- VAmPI's connexion-generated spec is exactly this case, same gap our
+own demo API had before FastAPI's plain Header()-based auth was accounted
+for. Without a baseline check, "the forged token was accepted" is
+indistinguishable from "this endpoint never checked auth in the first
+place", which produced real false positives when scanning VAmPI. So before
+concluding a forgery succeeded, we first confirm the endpoint actually
+enforces SOME auth check at all, by sending an obviously-invalid credential
+and requiring that to be rejected. If even garbage credentials get through,
+there's nothing to bypass, and we skip.
 """
 
 from __future__ import annotations
@@ -62,6 +76,19 @@ class BrokenAuthCheck:
             return []
 
         url = endpoint.url(ctx.base_url)
+
+        # Baseline: does this endpoint enforce auth AT ALL? An obviously
+        # invalid credential should be rejected. If it isn't, there's no
+        # signature check here to bypass -- skip before even trying the
+        # forgery, rather than reporting a meaningless "bypass".
+        baseline_headers = {**session.headers, "Authorization": "Bearer not-a-real-token"}
+        try:
+            baseline_resp = session.request(endpoint.method, url, headers=baseline_headers, timeout=5)
+        except requests.RequestException:
+            return []
+        if baseline_resp.status_code < 400:
+            return []  # no meaningful auth check here; forging anything is moot
+
         forged_headers = {**session.headers, "Authorization": f"Bearer {forged}"}
         try:
             resp = session.request(endpoint.method, url, headers=forged_headers, timeout=5)

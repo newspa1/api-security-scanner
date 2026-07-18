@@ -75,7 +75,17 @@ def _value_looks_secret(value: object) -> str | None:
     for label, pattern in _VALUE_SHAPES:
         if pattern.search(value):
             return label
-    if len(value) >= _ENTROPY_MIN_LEN and _shannon_entropy(value) >= _ENTROPY_THRESHOLD:
+    # The entropy fallback requires no whitespace: real secrets (JWTs,
+    # hashes, API keys) are structurally single unbroken tokens -- their
+    # encodings (base64, hex, ...) never contain spaces. Prose almost always
+    # does. Found scanning VAmPI (github.com/erev0s/VAmPI): a long, varied
+    # English help-text sentence tripped the entropy threshold and was a
+    # real false positive until this filter was added.
+    if (
+        len(value) >= _ENTROPY_MIN_LEN
+        and not re.search(r"\s", value)
+        and _shannon_entropy(value) >= _ENTROPY_THRESHOLD
+    ):
         return "high-entropy"
     return None
 

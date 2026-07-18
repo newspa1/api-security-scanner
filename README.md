@@ -37,6 +37,15 @@ own README). See each module in `src/apisec/checks/` for the detection
 approach — every check's docstring documents its algorithm, scope decisions,
 and known limitations (each is a heuristic, not a formal proof).
 
+**Validated against a real API, not just our own** — a self-built demo
+proves the scanner catches what it was told to catch; it says nothing about
+whether it generalizes. `apisec` has also been run against
+[VAmPI](https://github.com/erev0s/VAmPI), an independent, third-party
+vulnerable API project, and graded against *its own* documented bug list —
+including two real false positives that were found and permanently fixed as
+a direct result. See [`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md) for
+the full, honest write-up (hits, misses, and fixes, not just a hit count).
+
 ## Quickstart
 
 ```bash
