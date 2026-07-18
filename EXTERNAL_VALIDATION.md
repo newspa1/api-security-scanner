@@ -195,6 +195,45 @@ remember what it submitted, not read a response). This account-takeover
 bug still needs write-based BOLA specifically, and it's now the clearest
 concrete argument for building it.
 
+**Re-checked again after adding Mass Assignment POST support — reaches the
+right resource now, but still can't see the bug, for a third, even more
+precise reason.** `mass_assignment.py` now tests POST/create endpoints
+(`_confirm_field_on_post()`, `checks/base.py`'s `find_item_endpoint_for_payload()`):
+when a create response has no server-generated id to extract, it falls back
+to matching a GET endpoint's path parameter name against a key in the
+payload we just sent. For VAmPI this works exactly as designed —
+`POST /users/v1/register`'s payload has a `username` field, which correctly
+matches `GET /users/v1/{username}`'s path parameter, so the check DOES
+locate and read back the resource it just created. Manually confirmed the
+full picture with `admin: true` injected at registration:
+
+```
+$ curl -s -X POST http://localhost:5000/users/v1/register -d '{"username":"masstest2",...,"admin":true}'
+{"message": "Successfully registered...", "status": "success"}
+
+$ curl -s http://localhost:5000/users/v1/masstest2        # what the check reads back
+{"username": "masstest2", "email": "masstest2@example.com"}
+
+$ curl -s http://localhost:5000/users/v1/_debug | ...       # ground truth
+{"admin": true, "email": "masstest2@example.com", "password": "MassPass2!", "username": "masstest2"}
+```
+
+`admin: true` genuinely persisted server-side — but `GET /users/v1/{username}`
+never returns an `admin` field for ANY user, vulnerable or not, so there's
+nothing for a correctly-executed read-back to see. Re-scanning confirmed
+zero Mass Assignment findings, exactly as this reasoning predicts. The only
+VAmPI endpoint that does expose `admin` is `GET /users/v1/_debug`, which
+returns a list of every user rather than one resource addressable by id —
+a "search a list for a matching entry" lookup shape, not "GET one resource
+by id," which is a distinct mechanism this pass didn't build. So the
+three-part diagnosis for this specific bug is now complete and precise: (1)
+POST wasn't tested at all — fixed; (2) the id was client-chosen, not
+server-generated — fixed (the payload-key fallback exists for exactly this);
+(3) the item endpoint's own response schema doesn't surface the field being
+tested — not fixed, and structurally different from (1) and (2): it's a
+response-shape gap, not a resource-discovery gap, and would need a
+list-search readback strategy as its own follow-up.
+
 #### 4c. A legitimate critique of the severity model
 
 One of the follow-up passes raised a good point about §1: an *unauthenticated*
@@ -238,7 +277,7 @@ implements. Not finding it is correct, not a miss.
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
 | Unauthorized password change (account takeover) | ❌ **Still missed** — id discovery doesn't help here | Username is client-chosen; register response has no id to extract (§4b) |
-| Registration-time privilege escalation (`admin: true`) | ❌ **Missed** — confirmed exploitable | Mass Assignment excludes POST by design (MVP scope) |
+| Registration-time privilege escalation (`admin: true`) | ❌ **Still missed** — resource correctly located now, field just isn't exposed anywhere addressable | POST support + client-chosen-id readback both work (§4b); `GET /users/v1/{username}` never returns `admin` for any user — would need a list-search readback strategy (`/users/v1/_debug`), not built |
 | BOLA (`/users/v1/{username}` reads) | ❌ **Still missed** — same reason | Same client-chosen-identifier limitation |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
@@ -485,6 +524,16 @@ about any of them.
   match crAPI's actual vulnerable fields (quantity/refund-flavored). This
   is the kind of gap that's easy to miss until the more obvious problem in
   front of it is actually solved.
+- **The same pattern repeated on VAmPI's registration bug, one layer
+  deeper.** Adding POST support to Mass Assignment, then a client-chosen-id
+  fallback, correctly closed two of the three reasons this specific bug was
+  invisible — and each fix precisely exposed the next one underneath, until
+  what's left is a genuinely different kind of gap (the vulnerable field is
+  never in ANY read-by-id response, only in a list-all response) rather
+  than a vaguer, un-diagnosed miss. Manually confirmed with `/_debug` that
+  the field really does persist server-side the whole time — every fix
+  along the way was solving a real detection problem, not chasing a
+  phantom.
 
 ## Future work
 
@@ -492,26 +541,34 @@ about any of them.
   (`checks/base.py`) creates a real resource via a sibling POST and reads
   its id back, tried before falling back to numeric guessing. Confirmed
   working on crAPI (found order id 9, and a second, non-numeric BOLA on
-  community posts); confirmed NOT sufficient for VAmPI's client-chosen
-  usernames (see below).
+  community posts).
 - ~~A retry loop for Mass Assignment~~ — **done**, then found insufficient
   alone, which is what motivated id discovery above.
-- **Recovering client-chosen identifiers** — the harder half of "id
-  discovery." When a resource's id is something the caller supplies at
-  creation time (VAmPI's usernames) rather than something the server
-  generates, there's no id to extract from the create response; the check
-  would need to remember what it submitted instead. Would close VAmPI's
-  account-takeover gap if combined with write-based BOLA below.
+- ~~Mass Assignment on POST~~ — **done.** `_confirm_field_on_post()`
+  (`mass_assignment.py`) creates a resource with an injected field and
+  checks whether it's reflected in the create response or a subsequent
+  read-back.
+- ~~Recovering client-chosen identifiers~~ — **done**, as a fallback within
+  the POST support above: `find_item_endpoint_for_payload()`
+  (`checks/base.py`) matches a GET endpoint's path parameter name against a
+  key in the payload just submitted (e.g. `username`), for cases where the
+  create response has no server-generated id to extract at all. Confirmed
+  correctly locating and reading back VAmPI's freshly-registered user via
+  `GET /users/v1/{username}` — the resource-discovery half of VAmPI's
+  registration bug is fully solved; what remains is a different problem
+  (below).
+- **A "search a list" readback strategy**, distinct from "read one resource
+  by id" — the new, precise, remaining reason Mass Assignment still misses
+  VAmPI's registration bug: `admin: true` genuinely persists (confirmed via
+  `/_debug`), but no id-addressable endpoint ever returns an `admin` field
+  for any user, so a correctly-executed read-back has nothing to see. Would
+  need to recognize array-returning endpoints (`GET /users/v1/_debug`
+  returns `{"users": [...]}`) and search them for an entry matching what
+  was just created, a different lookup shape than everything built so far.
 - **Write-based BOLA** (PATCH/DELETE/PUT another user's object, not just
-  GET) — VAmPI's account-takeover bug specifically needs this combined
-  with the item above; still not attempted.
-- **Mass Assignment on POST** (resource creation) — would close the
-  VAmPI registration privilege-escalation gap. Needs a way to find the
-  created resource back (response body or `Location` header) — note
-  `discover_resource_id()` already does exactly this for a *different*
-  purpose (finding an id to test), so extending Mass Assignment to test
-  the POST response itself for injected fields is a smaller lift now than
-  when this was originally scoped out.
+  GET) — still needed for VAmPI's *other* severe bug, the password-change
+  account takeover (distinct from the registration bug above; unrelated to
+  Mass Assignment).
 - **A broader Mass Assignment candidate-field list**, or a config surface
   for target-specific fields — today's list is privilege-escalation-flavored
   and confirmed to miss financial/business-logic mass assignment (crAPI

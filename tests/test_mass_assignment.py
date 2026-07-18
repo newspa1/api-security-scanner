@@ -100,13 +100,146 @@ def test_get_method_is_skipped():
     assert MassAssignmentCheck().run(ep, ctx) == []
 
 
-def test_post_method_is_skipped():
-    # Documented scope decision: POST (creation) isn't handled -- see the
-    # module docstring for why.
+def test_post_no_finding_when_secure_create_handler_ignores_extra_fields():
     ep = Endpoint(path="/things", method="POST", operation_id="create_thing")
-    session = _FakeSession({}, accept_fields=None)
+    session = _FakeSession({}, accept_fields=set())  # secure: applies nothing extra
     ctx = ScanContext(base_url="http://x", session_a=session)
     assert MassAssignmentCheck().run(ep, ctx) == []
+
+
+# ---- POST (creation) support ---------------------------------------------------
+
+def _register_endpoint(schema=None):
+    return Endpoint(
+        path="/users/v1/register", method="POST", operation_id="register", request_body_schema=schema
+    )
+
+
+def _orders_collection_endpoint(schema=None):
+    return Endpoint(
+        path="/orders", method="POST", operation_id="create_order", request_body_schema=schema
+    )
+
+
+def _order_item_endpoint():
+    return Endpoint(path="/orders/{order_id}", method="GET", operation_id="get_order")
+
+
+def test_post_flags_when_create_response_reflects_injected_field():
+    # /things has no declared schema, so every candidate field is
+    # "undeclared"; the fake session echoes whatever it's sent straight
+    # back in the response body -- confirmable with no GET at all.
+    ep = Endpoint(path="/things", method="POST", operation_id="create_thing")
+    session = _FakeSession({}, accept_fields=None)  # vulnerable: echoes everything
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    findings = MassAssignmentCheck().run(ep, ctx)
+    assert len(findings) == 1
+    assert "role" in findings[0].evidence
+    assert "on creation" in findings[0].evidence
+
+
+class _FakeCreateThenReadSession:
+    """POST returns only a server-generated id (no field reflection); GET
+    on the item endpoint returns whatever was actually stored -- simulates
+    a create-then-fetch flow where the injected field persisted server-side
+    without being echoed in the create response itself."""
+
+    def __init__(self):
+        self.next_id = 1
+        self.stored_by_id: dict[str, dict] = {}
+        self.get_urls: list[str] = []
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        item_id = str(self.next_id)
+        self.next_id += 1
+        self.stored_by_id[item_id] = dict(json or {})
+        return _FakeResponse(201, {"id": int(item_id)})
+
+    def get(self, url, timeout=5, **kwargs):
+        self.get_urls.append(url)
+        body = self.stored_by_id.get(url.rsplit("/", 1)[-1])
+        return _FakeResponse(200, body) if body is not None else _FakeResponse(404)
+
+
+def test_post_flags_via_discovered_id_readback_when_response_does_not_reflect():
+    session = _FakeCreateThenReadSession()
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[_orders_collection_endpoint(), _order_item_endpoint()],
+    )
+    findings = MassAssignmentCheck().run(_orders_collection_endpoint(), ctx)
+    assert len(findings) == 1
+    assert "role" in findings[0].evidence
+    # confirms it actually read the item endpoint back, not just the create response
+    assert len(session.get_urls) > 0
+
+
+class _FakeClientChosenIdSession:
+    """Simulates VAmPI-style registration: the create response has no id at
+    all (just a status message) -- the resource's identifier is whatever
+    the CALLER supplied in the payload (e.g. `username`), not something the
+    server generates. GET-by-that-value returns whatever was stored."""
+
+    def __init__(self, id_field: str):
+        self.id_field = id_field
+        self.stored: dict[str, dict] = {}
+        self.get_urls: list[str] = []
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        payload = json or {}
+        self.stored[str(payload.get(self.id_field))] = dict(payload)
+        return _FakeResponse(200, {"message": "created", "status": "success"})
+
+    def get(self, url, timeout=5, **kwargs):
+        self.get_urls.append(url)
+        body = self.stored.get(url.rsplit("/", 1)[-1])
+        return _FakeResponse(200, body) if body is not None else _FakeResponse(404)
+
+
+def test_post_flags_via_payload_key_readback_for_client_chosen_id():
+    schema = {
+        "type": "object",
+        "properties": {"username": {"type": "string"}, "password": {"type": "string"}},
+    }
+    session = _FakeClientChosenIdSession(id_field="username")
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[
+            _register_endpoint(schema),
+            Endpoint(path="/users/v1/{username}", method="GET", operation_id="get_user"),
+        ],
+    )
+    findings = MassAssignmentCheck().run(_register_endpoint(schema), ctx)
+    assert len(findings) == 1
+    assert "admin" in findings[0].evidence
+    # confirms it actually resolved the resource via the submitted username,
+    # not a server-generated id (there wasn't one)
+    assert any(url.endswith("/apisec-test") for url in session.get_urls)
+
+
+def test_post_no_finding_when_no_reflection_and_no_readback_possible():
+    # response has no id, and there's no sibling GET endpoint at all -- both
+    # readback strategies come up empty, so this is "no evidence", not a
+    # finding, even though the write itself wasn't rejected.
+    class _NoInfoSession:
+        def request(self, method, url, json=None, timeout=5, **kwargs):
+            return _FakeResponse(200, {"message": "created"})
+
+    ctx = ScanContext(
+        base_url="http://x", session_a=_NoInfoSession(), all_endpoints=[_orders_collection_endpoint()]
+    )
+    assert MassAssignmentCheck().run(_orders_collection_endpoint(), ctx) == []
+
+
+def test_post_no_finding_when_create_is_rejected():
+    class _RejectingSession:
+        def request(self, method, url, json=None, timeout=5, **kwargs):
+            return _FakeResponse(422)
+
+    ctx = ScanContext(base_url="http://x", session_a=_RejectingSession())
+    assert MassAssignmentCheck().run(_orders_collection_endpoint(), ctx) == []
 
 
 # ---- id-retry logic, using an id-aware fake session ---------------------------

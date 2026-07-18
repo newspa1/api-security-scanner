@@ -1,8 +1,12 @@
 """Tests for shared check infrastructure in checks/base.py: build_legit_payload
-(moved here from mass_assignment.py, now shared) and the id-DISCOVERY
-machinery -- create a real resource via a sibling POST, read its real id back
--- that bola.py and mass_assignment.py both try first before falling back to
-sequential-integer guessing (concrete_url's default).
+(moved here from mass_assignment.py, now shared), the id-DISCOVERY machinery
+-- create a real resource via a sibling POST, read its real id back -- that
+bola.py and mass_assignment.py both try first before falling back to
+sequential-integer guessing (concrete_url's default), and the two POST
+read-back helpers mass_assignment.py uses to verify a Mass Assignment finding
+on a creation endpoint: _item_endpoint_for_collection_path (server-generated
+id -> matching item GET) and find_item_endpoint_for_payload (client-chosen id
+-> matching item GET via a shared field name).
 """
 
 from __future__ import annotations
@@ -11,8 +15,10 @@ from apisec.checks.base import (
     ScanContext,
     _collection_path,
     _extract_id_from_response,
+    _item_endpoint_for_collection_path,
     build_legit_payload,
     discover_resource_id,
+    find_item_endpoint_for_payload,
 )
 from apisec.spec_loader import Endpoint
 
@@ -161,3 +167,61 @@ def test_discover_resource_id_uses_collection_endpoints_own_schema_for_payload()
     )
     discover_resource_id(_order_item_endpoint(), ctx)
     assert session.calls[0][2] == {"product_id": 1}  # built from the POST's OWN schema
+
+
+# ---- _item_endpoint_for_collection_path (reverse of _collection_path) -----------
+
+def test_item_endpoint_for_collection_path_finds_matching_get():
+    endpoints = [_order_collection_endpoint(), _order_item_endpoint()]
+    found = _item_endpoint_for_collection_path("/orders", endpoints)
+    assert found is not None
+    assert found.path == "/orders/{order_id}"
+    assert found.method == "GET"
+
+
+def test_item_endpoint_for_collection_path_none_when_no_match():
+    assert _item_endpoint_for_collection_path("/orders", [_order_collection_endpoint()]) is None
+
+
+def test_item_endpoint_for_collection_path_ignores_non_get_methods():
+    # a PATCH on /orders/{order_id} doesn't count as the "item GET"
+    patch_ep = Endpoint(path="/orders/{order_id}", method="PATCH", operation_id="update_order")
+    assert _item_endpoint_for_collection_path("/orders", [patch_ep]) is None
+
+
+# ---- find_item_endpoint_for_payload (client-chosen id fallback) -----------------
+
+def _user_item_endpoint():
+    return Endpoint(path="/users/v1/{username}", method="GET", operation_id="get_user")
+
+
+def test_find_item_endpoint_for_payload_matches_path_param_to_payload_key():
+    payload = {"username": "alice", "password": "hunter2"}
+    endpoint, value = find_item_endpoint_for_payload(payload, [_user_item_endpoint()])
+    assert endpoint is not None
+    assert endpoint.path == "/users/v1/{username}"
+    assert value == "alice"
+
+
+def test_find_item_endpoint_for_payload_none_when_no_key_matches():
+    payload = {"email": "alice@example.com"}
+    endpoint, value = find_item_endpoint_for_payload(payload, [_user_item_endpoint()])
+    assert endpoint is None
+    assert value is None
+
+
+def test_find_item_endpoint_for_payload_skips_multi_param_paths():
+    multi_param_ep = Endpoint(path="/users/v1/{username}/orders/{order_id}", method="GET", operation_id="x")
+    payload = {"username": "alice"}
+    endpoint, value = find_item_endpoint_for_payload(payload, [multi_param_ep])
+    assert endpoint is None
+    assert value is None
+
+
+def test_find_item_endpoint_for_payload_ignores_boolean_values():
+    # bool is an int subclass -- must not be mistaken for a usable id value
+    ep = Endpoint(path="/flags/{enabled}", method="GET", operation_id="get_flag")
+    payload = {"enabled": True}
+    endpoint, value = find_item_endpoint_for_payload(payload, [ep])
+    assert endpoint is None
+    assert value is None

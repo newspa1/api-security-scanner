@@ -7,42 +7,69 @@ much returned on read"; Mass Assignment is "too much accepted on write". See
 excessive_data_exposure.py for the read-side sibling -- both correctly share
 check id API3:2023, distinguished by `title`.)
 
-ALGORITHM:
-1. Only PATCH/PUT on an existing, id-addressable resource (see SCOPE below
-   for why POST is excluded).
-2. Build a "legitimate" payload from `endpoint.request_body_schema`'s
+ALGORITHM, PATCH/PUT (an existing, id-addressable resource):
+1. Build a "legitimate" payload from `endpoint.request_body_schema`'s
    declared properties (a plausible placeholder value per JSON Schema type),
    so the request has a real chance of passing basic validation.
-3. Find a real, writable resource: for each candidate id (same
-   `_CANDIDATE_IDS` list bola.py uses), send the LEGIT-only payload (no
-   injected field) to that id. The first one that doesn't get rejected
+2. Find a real, writable resource: try a discovered id first
+   (`discover_resource_id()`, base.py), then for each candidate guessed id
+   (`_CANDIDATE_IDS`, same list bola.py uses), send the LEGIT-only payload
+   (no injected field) to that id. The first one that doesn't get rejected
    outright (< 400) is treated as "a real resource user A can write to" and
    locked in -- stop trying further ids. If none work, there's nothing to
    test; return no findings rather than guessing against a resource that
    was never confirmed to exist.
-4. Against that one locked-in id: for each candidate privileged field NOT
+3. Against that one locked-in id: for each candidate privileged field NOT
    in the declared schema (role, is_admin, permissions, ...), add it to the
    legit payload and send the write.
-5. GET the same URL back and check whether the injected field's value
+4. GET the same URL back and check whether the injected field's value
    actually stuck. If it did, the handler is binding the raw request body
    onto its model instead of an explicit allowlist of writable fields --
    that's the finding. A field that's rejected, ignored, or the request
    itself failing (4xx) is NOT evidence of anything.
 
-SCOPE: excludes POST. A PATCH/PUT target is id-addressable, so "read back
-the same URL" is well-defined. A POST typically CREATES a resource at a
-different URL than the collection endpoint, and finding it back requires
-parsing the response for an id (or a Location header) -- a real follow-up,
-not done here.
+ALGORITHM, POST (resource creation) -- see `_confirm_field_on_post()`:
+Each candidate field gets its own fresh create + verify round trip (unlike
+PATCH/PUT, a POST makes a NEW resource every time, so there's no single id
+to lock onto and reuse). After creating with the injected field:
+1. Check if the create response itself reflects the field back -- many
+   APIs return the created object directly, no read-back needed.
+2. If not, try to read the resource back and check there instead: first via
+   a server-generated id extracted from the response
+   (`_extract_id_from_response()`) matched to a sibling item GET endpoint
+   (`_item_endpoint_for_collection_path()`, the reverse of
+   `discover_resource_id()`'s own direction); if that finds nothing, via
+   `find_item_endpoint_for_payload()` -- for a CLIENT-CHOSEN id (e.g. a
+   username WE supplied at registration, never echoed back by the server),
+   match a GET endpoint's path parameter name against a key in the payload
+   we just sent, and use the value we supplied as the id.
+3. If no way to read it back was found at all, that's "no evidence either
+   way", not a finding.
 
-CONFIRMED COST of the POST exclusion (external validation against VAmPI,
-github.com/erev0s/VAmPI, see EXTERNAL_VALIDATION.md #4b): VAmPI's
+FORMERLY SCOPED OUT, POST support added this pass (previously: "excludes
+POST. A PATCH/PUT target is id-addressable, so 'read back the same URL' is
+well-defined. A POST typically CREATES a resource at a different URL...
+finding it back requires parsing the response for an id... a real
+follow-up, not done here.") -- prompted by a confirmed, exploitable finding
+on VAmPI (github.com/erev0s/VAmPI, see EXTERNAL_VALIDATION.md #4b):
 `POST /users/v1/register` silently accepts an undeclared `admin: true`
-field, granting instant admin rights on account creation -- a real,
-directly exploitable privilege escalation this check cannot see, precisely
-because it's a POST. This didn't change the SCOPE decision (still a bigger
-change than this pass), but it upgrades "a real follow-up" from
-hypothetical to confirmed-and-prioritized.
+field, granting instant admin rights on account creation.
+
+STILL DOESN'T CATCH THAT SPECIFIC VAmPI BUG, for a precise and different
+reason than before: VAmPI's register payload has a `username` field, which
+DOES correctly match `find_item_endpoint_for_payload()` against
+`GET /users/v1/{username}`'s path parameter -- the create-to-read-back
+correlation works exactly as designed. But that item endpoint's own
+response schema only returns `{"username", "email"}` -- it never exposes
+`admin` at all, on ANY user, vulnerable or not. There's no place for the
+finding to surface even with the resource correctly located; the only
+VAmPI endpoint that DOES show `admin` (`GET /users/v1/_debug`) returns a
+list of all users, not one resource addressable by id, which is a
+different lookup shape (search-a-list, not read-by-id) not handled here.
+Re-verifying this specific case requires that additional list-search
+mechanism -- a further, separate piece of future work, distinct from
+"POST isn't handled" (which is now fixed) and distinct from "can't find a
+client-chosen id" (also now fixed).
 
 FIXED after being found scanning OWASP crAPI (github.com/OWASP/crAPI, see
 EXTERNAL_VALIDATION.md target 2 #4): `concrete_url`'s default placeholder
@@ -91,9 +118,12 @@ from apisec.checks.base import (
     Finding,
     ScanContext,
     Severity,
+    _extract_id_from_response,
+    _item_endpoint_for_collection_path,
     build_legit_payload,
     concrete_url,
     discover_resource_id,
+    find_item_endpoint_for_payload,
 )
 from apisec.spec_loader import Endpoint
 
@@ -119,12 +149,71 @@ def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
     return [discovered, *_CANDIDATE_IDS]
 
 
+def _confirm_field_on_post(
+    endpoint: Endpoint,
+    ctx: ScanContext,
+    field_name: str,
+    injected_value: object,
+    legit_payload: dict,
+) -> bool:
+    """POST creates a NEW resource per attempt (unlike PATCH/PUT, which
+    reuses one locked-in id), so each candidate field gets its own create +
+    verify round trip. Two ways to confirm the field stuck:
+    1. The create response itself reflects it back (many APIs return the
+       created object directly) -- no read-back needed.
+    2. A separate GET finds the resource: first via a server-generated id
+       in the create response matched to a sibling item endpoint (mirrors
+       discover_resource_id()'s direction, reversed), then, if that finds
+       nothing, via find_item_endpoint_for_payload() for client-chosen
+       ids (e.g. a username we supplied ourselves)."""
+    payload = {**legit_payload, field_name: injected_value}
+    try:
+        resp = ctx.session_a.request("POST", endpoint.url(ctx.base_url), json=payload, timeout=5)
+    except requests.RequestException:
+        return False
+    if resp.status_code >= 400:
+        return False  # rejected outright -- not evidence either way
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+
+    if isinstance(body, dict) and body.get(field_name) == injected_value:
+        return True
+
+    read_url = None
+    if isinstance(body, dict):
+        discovered_id = _extract_id_from_response(body)
+        if discovered_id is not None:
+            item_endpoint = _item_endpoint_for_collection_path(endpoint.path, ctx.all_endpoints)
+            if item_endpoint is not None:
+                read_url = concrete_url(item_endpoint.path, ctx.base_url, discovered_id)
+    if read_url is None:
+        item_endpoint, id_value = find_item_endpoint_for_payload(payload, ctx.all_endpoints)
+        if item_endpoint is not None:
+            read_url = concrete_url(item_endpoint.path, ctx.base_url, id_value)
+    if read_url is None:
+        return False  # created it, but no way to read it back and check
+
+    try:
+        read_resp = ctx.session_a.get(read_url, timeout=5)
+    except requests.RequestException:
+        return False
+    if read_resp.status_code >= 400:
+        return False
+    try:
+        read_body = read_resp.json()
+    except ValueError:
+        return False
+    return isinstance(read_body, dict) and read_body.get(field_name) == injected_value
+
+
 class MassAssignmentCheck:
     id = "API3:2023"
     title = "Mass Assignment"
 
     def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
-        if endpoint.method not in {"PATCH", "PUT"}:
+        if endpoint.method not in {"PATCH", "PUT", "POST"}:
             return []
 
         declared_fields = set((endpoint.request_body_schema or {}).get("properties", {}))
@@ -137,6 +226,34 @@ class MassAssignmentCheck:
             return []
 
         legit_payload = build_legit_payload(endpoint.request_body_schema)
+
+        if endpoint.method == "POST":
+            confirmed = [
+                field_name
+                for field_name, injected_value in candidates
+                if _confirm_field_on_post(endpoint, ctx, field_name, injected_value, legit_payload)
+            ]
+            if not confirmed:
+                return []
+            return [
+                Finding(
+                    check_id=self.id,
+                    title=self.title,
+                    severity=Severity.HIGH,
+                    endpoint=endpoint.path,
+                    method=endpoint.method,
+                    description=(
+                        "The creation endpoint accepted and applied request body "
+                        "field(s) that aren't declared in its OpenAPI schema, "
+                        "suggesting it binds the raw request body onto its model "
+                        "instead of an explicit allowlist of writable fields."
+                    ),
+                    evidence=(
+                        "undeclared field(s) accepted and persisted on creation: "
+                        f"{', '.join(confirmed)}"
+                    ),
+                )
+            ]
 
         url = None
         used_id = None

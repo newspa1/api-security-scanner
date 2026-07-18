@@ -136,6 +136,57 @@ def _extract_id_from_response(body: object) -> str | None:
     return None
 
 
+def _item_endpoint_for_collection_path(
+    collection_path: str, all_endpoints: list[Endpoint]
+) -> Endpoint | None:
+    """Reverse of _collection_path: given a collection path (e.g. "/orders"),
+    find the sibling GET item endpoint (e.g. "/orders/{id}") whose own
+    computed collection path matches. Used by Mass Assignment's POST support
+    to read a freshly-created resource back by its server-generated id."""
+    return next(
+        (e for e in all_endpoints if e.method == "GET" and _collection_path(e.path) == collection_path),
+        None,
+    )
+
+
+def _single_path_param_name(path: str) -> str | None:
+    """The one `{param}` name in a path, or None if there isn't exactly
+    one -- multi-param paths are out of scope for the simple
+    substitute-one-value approach both this module and concrete_url use."""
+    segments = [s for s in path.strip("/").split("/") if s.startswith("{") and s.endswith("}")]
+    if len(segments) != 1:
+        return None
+    return segments[0][1:-1]
+
+
+def find_item_endpoint_for_payload(
+    payload: dict, all_endpoints: list[Endpoint]
+) -> tuple[Endpoint | None, str | None]:
+    """Fallback for CLIENT-CHOSEN identifiers, where discover_resource_id()
+    and _item_endpoint_for_collection_path() both come up empty: if the id
+    is something the caller supplied (e.g. VAmPI's username, chosen at
+    registration) rather than something the server generates, there's
+    nothing to extract from the create response, and the create endpoint's
+    own path (e.g. "/users/v1/register") often isn't a collection-path
+    match for the item endpoint's path (e.g. "/users/v1/{username}") at
+    all -- register is a verb-shaped endpoint, not a REST collection.
+
+    Instead: find a GET endpoint with exactly one path parameter whose NAME
+    matches a key we just submitted in the create payload (e.g. path param
+    "username" <-> payload key "username"), and use the value we sent as
+    the id. Returns (None, None) if nothing matches."""
+    for candidate_endpoint in all_endpoints:
+        if candidate_endpoint.method != "GET":
+            continue
+        param_name = _single_path_param_name(candidate_endpoint.path)
+        if param_name is None or param_name not in payload:
+            continue
+        value = payload[param_name]
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            return candidate_endpoint, str(value)
+    return None, None
+
+
 def discover_resource_id(endpoint: Endpoint, ctx: ScanContext) -> str | None:
     """Find a REAL id by creating a resource, instead of guessing one:
     locate a sibling POST on this endpoint's collection path (e.g.
