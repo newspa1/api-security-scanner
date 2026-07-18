@@ -81,7 +81,7 @@ def test_flags_when_injected_field_persists():
     ctx = ScanContext(base_url="http://x", session_a=session)
     findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
     assert len(findings) == 1
-    assert findings[0].check_id == "API6:2023"
+    assert findings[0].check_id == "API3:2023"
     assert "role" in findings[0].evidence
 
 
@@ -140,5 +140,5 @@ def test_integration_mass_assignment_on_users_endpoint(demo_client, demo_session
     findings = MassAssignmentCheck().run(ep, ctx)
 
     assert len(findings) == 1
-    assert findings[0].check_id == "API6:2023"
+    assert findings[0].check_id == "API3:2023"
     assert "role" in findings[0].evidence

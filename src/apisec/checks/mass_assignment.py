@@ -1,4 +1,11 @@
-"""API6:2023 - Mass Assignment.
+"""API3:2023 - Broken Object Property Level Authorization
+(the "write" facet -- formerly its own category, "Mass Assignment" /
+API6:2019. OWASP's 2023 revision merged Mass Assignment and Excessive Data
+Exposure into one category, since both are missing property-level
+authorization, just in opposite directions: Excessive Data Exposure is "too
+much returned on read"; Mass Assignment is "too much accepted on write". See
+excessive_data_exposure.py for the read-side sibling -- both correctly share
+check id API3:2023, distinguished by `title`.)
 
 ALGORITHM:
 1. Only PATCH/PUT on an existing, id-addressable resource (see SCOPE below
@@ -70,7 +77,7 @@ def _build_legit_payload(schema: dict | None) -> dict:
 
 
 class MassAssignmentCheck:
-    id = "API6:2023"
+    id = "API3:2023"
     title = "Mass Assignment"
 
     def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:

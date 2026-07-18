@@ -40,7 +40,7 @@ Orders: order `1` belongs to user A, order `2` belongs to user B.
 | `GET /users/{id}` | returns `password_hash` in the body | Excessive Data Exposure (API3) |
 | `GET /users/{id}` | no ownership check — any user can read any id | BOLA (API1) |
 | `GET /orders/{id}` | no ownership check | BOLA (API1) |
-| `PATCH /users/{id}` | applies undeclared body fields (e.g. `role`) not in the schema | Mass Assignment (API6) |
+| `PATCH /users/{id}` | applies undeclared body fields (e.g. `role`) not in the schema | Mass Assignment (API3) |
 
 `GET /me` is deliberately **clean** (no `password_hash`) so the Excessive Data
 Exposure check has exactly one true positive to find (`/users/{id}`).

@@ -19,8 +19,15 @@ breaks."
 |---|---|---|
 | Broken Authentication (JWT `alg=none`) | API2:2023 | ✅ implemented |
 | Broken Object Level Authorization (BOLA) | API1:2023 | ⏳ stub — Week 2 |
-| Mass Assignment | API6:2023 | ⏳ stub — Week 3 |
+| Mass Assignment | API3:2023 | ⏳ stub — Week 3 |
 | Excessive Data Exposure | API3:2023 | ⏳ stub — Week 3-4 |
+
+> Mass Assignment and Excessive Data Exposure intentionally share OWASP id
+> API3:2023 ("Broken Object Property Level Authorization") — OWASP merged
+> what were two separate 2019 categories into one in the 2023 revision (read
+> vs write facets of the same missing property-level authorization). This
+> scanner reports them as two distinct checks under that shared id,
+> distinguished by `title`.
 
 See each module in `src/apisec/checks/` for the implementation plan —
 every stub has a docstring describing the exact approach.
@@ -52,8 +59,8 @@ src/apisec/
     base.py         # Check protocol + Finding dataclass
     broken_auth.py   # API2 — JWT alg=none (reference implementation)
     bola.py           # API1 — stub
-    mass_assignment.py         # API6 — stub
-    excessive_data_exposure.py # API3 — stub
+    mass_assignment.py         # API3 (write facet) — stub
+    excessive_data_exposure.py # API3 (read facet) — stub
 ```
 
 Adding a new check means implementing the `Check` protocol (`id`, `title`,
