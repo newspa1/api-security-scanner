@@ -74,6 +74,41 @@ Exit code `1` (blocks CI). `/announcements/{id}` — intentionally shared
 across users — is correctly *not* flagged, because it was passed via
 `--public-paths`.
 
+## Example targets
+
+Four small FastAPI apps to scan, each demonstrating a different, exact,
+predictable outcome — every claim below is enforced by a test that runs the
+real scanner and asserts the exact result (`tests/test_demo_*.py`), not just
+described in prose.
+
+| Target | Port | Planted bug(s) | Expected scan outcome |
+|---|---|---|---|
+| `demo_vulnerable_api` | 8000 | one bug per check (see its README) | 5 findings across all 3 OWASP ids |
+| `demo_secure_api` | 8001 | none — the control group | **zero findings**, exit `0` |
+| `demo_bola_only_api` | 8002 | missing ownership check on `GET /orders/{id}` | **exactly 1 finding**: `API1:2023` |
+| `demo_mass_assignment_only_api` | 8003 | `PATCH /me` applies undeclared fields | **exactly 1 finding**: `API3:2023` |
+
+Run any of them the same way — start it, log in as both seed users
+(`alice`/`alice-pw`, `bob`/`bob-pw`), then scan:
+
+```bash
+# pick one:
+uvicorn demo_vulnerable_api.app:app --port 8000
+uvicorn demo_secure_api.app:app --port 8001
+uvicorn demo_bola_only_api.app:app --port 8002
+uvicorn demo_mass_assignment_only_api.app:app --port 8003
+
+# in another terminal (adjust the port to match):
+PORT=8001
+TOKEN_A=$(curl -s -X POST http://localhost:$PORT/login -H 'Content-Type: application/json' -d '{"username":"alice","password":"alice-pw"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+TOKEN_B=$(curl -s -X POST http://localhost:$PORT/login -H 'Content-Type: application/json' -d '{"username":"bob","password":"bob-pw"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+apisec --spec http://localhost:$PORT/openapi.json --target http://localhost:$PORT \
+  --auth-header "Bearer $TOKEN_A" --auth-header-b "Bearer $TOKEN_B"
+```
+
+Each target has its own README with the specifics of what's planted (or
+deliberately not planted) and why.
+
 ## Architecture
 
 ```
@@ -87,8 +122,11 @@ src/apisec/
     bola.py           # API1 — two-identity cross-access diff
     mass_assignment.py         # API3 (write facet) — undeclared-field injection
     excessive_data_exposure.py # API3 (read facet) — hybrid 3-layer detection
-demo_vulnerable_api/  # intentionally-broken FastAPI app, one bug per check
-.github/workflows/scan.yml  # CI: pytest, then the scanner against the demo API
+demo_vulnerable_api/            # one bug per check, kitchen-sink demo
+demo_secure_api/                 # zero bugs -- control group
+demo_bola_only_api/               # exactly one bug: missing ownership check
+demo_mass_assignment_only_api/    # exactly one bug: unfiltered PATCH
+.github/workflows/scan.yml  # CI: pytest, then the scanner against demo_vulnerable_api
 ```
 
 Adding a new check means implementing the `Check` protocol (`id`, `title`,

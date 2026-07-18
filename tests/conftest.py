@@ -46,3 +46,26 @@ def demo_sessions(demo_client):
         return TestClientSession(demo_client, resp.json()["access_token"])
 
     return _login("alice", "alice-pw"), _login("bob", "bob-pw")
+
+
+@pytest.fixture
+def sessions_for():
+    """Generic version of demo_sessions, for the OTHER demo_*_api apps
+    (demo_secure_api, demo_bola_only_api, ...): given a FastAPI app and any
+    number of (username, password) pairs, returns (client, [sessions...]),
+    each logged in and ready to use as ScanContext session_a/session_b.
+    Does NOT reset the app's state -- call the app's own _reset_state()
+    first, same as demo_client does for the main demo."""
+
+    def _make(app, *credentials: tuple[str, str]):
+        client = TestClient(app)
+        sessions = [
+            TestClientSession(
+                client,
+                client.post("/login", json={"username": u, "password": p}).json()["access_token"],
+            )
+            for u, p in credentials
+        ]
+        return client, sessions
+
+    return _make
