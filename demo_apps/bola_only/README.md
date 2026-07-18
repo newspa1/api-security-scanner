@@ -8,12 +8,12 @@ ownership check. Scanning this should produce **exactly one finding**:
 ## Run it
 
 ```bash
-uvicorn demo_bola_only_api.app:app --port 8002
+uvicorn demo_apps.bola_only.app:app --port 8002
 ```
 
 ## Seed data
 
-Same as `demo_vulnerable_api`: `alice`/`alice-pw` (id 1), `bob`/`bob-pw` (id 2).
+Same as `demo_apps/vulnerable`: `alice`/`alice-pw` (id 1), `bob`/`bob-pw` (id 2).
 Order `1` belongs to Alice, order `2` belongs to Bob.
 
 ## The one planted bug

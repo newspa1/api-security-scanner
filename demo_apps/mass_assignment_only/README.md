@@ -9,7 +9,7 @@ finding**: `API3:2023` (Mass Assignment).
 ## Run it
 
 ```bash
-uvicorn demo_mass_assignment_only_api.app:app --port 8003
+uvicorn demo_apps.mass_assignment_only.app:app --port 8003
 ```
 
 ## Seed data

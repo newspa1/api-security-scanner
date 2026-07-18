@@ -1,21 +1,21 @@
 # Demo Secure API
 
-The control group: a sibling of `demo_vulnerable_api` with the exact same
+The control group: a sibling of `demo_apps/vulnerable` with the exact same
 shape (same login flow, same seed data, same endpoints) but every bug fixed.
 Scanning this should produce **zero findings**.
 
 ## Run it
 
 ```bash
-uvicorn demo_secure_api.app:app --port 8001
+uvicorn demo_apps.secure.app:app --port 8001
 ```
 
 ## Seed data
 
-Same as `demo_vulnerable_api`: `alice`/`alice-pw` (id 1), `bob`/`bob-pw` (id 2).
+Same as `demo_apps/vulnerable`: `alice`/`alice-pw` (id 1), `bob`/`bob-pw` (id 2).
 Order `1` belongs to Alice, order `2` belongs to Bob.
 
-## What's fixed, compared to `demo_vulnerable_api`
+## What's fixed, compared to `demo_apps/vulnerable`
 
 | Endpoint | Fix | Closes |
 |---|---|---|

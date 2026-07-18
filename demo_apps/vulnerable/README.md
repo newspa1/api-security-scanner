@@ -8,7 +8,7 @@ of the scanner's checks. **Do not deploy this anywhere.**
 
 ```bash
 pip install -e ".[dev]"        # from the repo root; installs fastapi + uvicorn
-uvicorn demo_vulnerable_api.app:app --reload
+uvicorn demo_apps.vulnerable.app:app --reload
 ```
 
 Then the OpenAPI spec the scanner consumes is served at

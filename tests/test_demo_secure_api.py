@@ -1,4 +1,4 @@
-"""Correctness tests for demo_secure_api -- the control group. Two layers:
+"""Correctness tests for demo_apps/secure -- the control group. Two layers:
 (1) the app itself behaves as designed (each fix actually works), and (2)
 running the REAL scanner (ALL_CHECKS) against it produces zero findings.
 That second layer is the part that actually proves "the scanner doesn't cry
@@ -16,7 +16,7 @@ import pytest
 from apisec.checks import ALL_CHECKS
 from apisec.checks.base import ScanContext
 from apisec.spec_loader import extract_endpoints
-from demo_secure_api.app import SECRET_KEY, _reset_state, app
+from demo_apps.secure.app import SECRET_KEY, _reset_state, app
 
 
 @pytest.fixture

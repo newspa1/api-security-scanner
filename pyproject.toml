@@ -43,8 +43,8 @@ packages = ["src/apisec"]
 line-length = 100
 
 [tool.pytest.ini_options]
-# The scanner package (apisec) is installed via `pip install -e`, but the
-# demo_vulnerable_api lives at the repo root as a test fixture (not shipped),
-# so add the root to the import path for tests.
+# The scanner package (apisec) is installed via `pip install -e`, but
+# demo_apps/ lives at the repo root as a test fixture (not shipped), so add
+# the root to the import path for tests.
 pythonpath = ["."]
 testpaths = ["tests"]

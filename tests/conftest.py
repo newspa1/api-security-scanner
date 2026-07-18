@@ -29,7 +29,7 @@ class TestClientSession:
 
 @pytest.fixture
 def demo_client():
-    from demo_vulnerable_api.app import _reset_state, app
+    from demo_apps.vulnerable.app import _reset_state, app
 
     _reset_state()
     return TestClient(app)
@@ -51,7 +51,7 @@ def demo_sessions(demo_client):
 @pytest.fixture
 def sessions_for():
     """Generic version of demo_sessions, for the OTHER demo_*_api apps
-    (demo_secure_api, demo_bola_only_api, ...): given a FastAPI app and any
+    (demo_apps.secure, demo_apps.bola_only, ...): given a FastAPI app and any
     number of (username, password) pairs, returns (client, [sessions...]),
     each logged in and ready to use as ScanContext session_a/session_b.
     Does NOT reset the app's state -- call the app's own _reset_state()

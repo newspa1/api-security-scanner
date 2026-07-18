@@ -3,7 +3,7 @@ correctly verified, /me's response is clean, and there's no id-addressable
 GET endpoint for BOLA to probe at all -- so scanning this should produce
 exactly ONE finding: API3:2023 (Mass Assignment).
 
-Run it with:  uvicorn demo_mass_assignment_only_api.app:app --port 8003
+Run it with:  uvicorn demo_apps.mass_assignment_only.app:app --port 8003
 """
 
 from __future__ import annotations

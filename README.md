@@ -31,7 +31,7 @@ breaks."
 > scanner reports them as two distinct checks under that shared id,
 > distinguished by `title`.
 
-All four checks are validated against `demo_vulnerable_api/` — an
+All four checks are validated against `demo_apps/vulnerable/` — an
 intentionally vulnerable FastAPI app with one planted bug per check (see its
 own README). See each module in `src/apisec/checks/` for the detection
 approach — every check's docstring documents its algorithm, scope decisions,
@@ -59,7 +59,7 @@ pytest
 
 ## Example scan output
 
-A real run against `demo_vulnerable_api` (see below) — this is the current
+A real run against `demo_apps/vulnerable` (see below) — this is the current
 scanner's actual output, not a mockup:
 
 | Severity | Check | Method | Endpoint | Evidence |
@@ -83,20 +83,20 @@ described in prose.
 
 | Target | Port | Planted bug(s) | Expected scan outcome |
 |---|---|---|---|
-| `demo_vulnerable_api` | 8000 | one bug per check (see its README) | 5 findings across all 3 OWASP ids |
-| `demo_secure_api` | 8001 | none — the control group | **zero findings**, exit `0` |
-| `demo_bola_only_api` | 8002 | missing ownership check on `GET /orders/{id}` | **exactly 1 finding**: `API1:2023` |
-| `demo_mass_assignment_only_api` | 8003 | `PATCH /me` applies undeclared fields | **exactly 1 finding**: `API3:2023` |
+| `demo_apps/vulnerable` | 8000 | one bug per check (see its README) | 5 findings across all 3 OWASP ids |
+| `demo_apps/secure` | 8001 | none — the control group | **zero findings**, exit `0` |
+| `demo_apps/bola_only` | 8002 | missing ownership check on `GET /orders/{id}` | **exactly 1 finding**: `API1:2023` |
+| `demo_apps/mass_assignment_only` | 8003 | `PATCH /me` applies undeclared fields | **exactly 1 finding**: `API3:2023` |
 
 Run any of them the same way — start it, log in as both seed users
 (`alice`/`alice-pw`, `bob`/`bob-pw`), then scan:
 
 ```bash
 # pick one:
-uvicorn demo_vulnerable_api.app:app --port 8000
-uvicorn demo_secure_api.app:app --port 8001
-uvicorn demo_bola_only_api.app:app --port 8002
-uvicorn demo_mass_assignment_only_api.app:app --port 8003
+uvicorn demo_apps.vulnerable.app:app --port 8000
+uvicorn demo_apps.secure.app:app --port 8001
+uvicorn demo_apps.bola_only.app:app --port 8002
+uvicorn demo_apps.mass_assignment_only.app:app --port 8003
 
 # in another terminal (adjust the port to match):
 PORT=8001
@@ -122,11 +122,12 @@ src/apisec/
     bola.py           # API1 — two-identity cross-access diff
     mass_assignment.py         # API3 (write facet) — undeclared-field injection
     excessive_data_exposure.py # API3 (read facet) — hybrid 3-layer detection
-demo_vulnerable_api/            # one bug per check, kitchen-sink demo
-demo_secure_api/                 # zero bugs -- control group
-demo_bola_only_api/               # exactly one bug: missing ownership check
-demo_mass_assignment_only_api/    # exactly one bug: unfiltered PATCH
-.github/workflows/scan.yml  # CI: pytest, then the scanner against demo_vulnerable_api
+demo_apps/
+  vulnerable/               # one bug per check, kitchen-sink demo
+  secure/                    # zero bugs -- control group
+  bola_only/                  # exactly one bug: missing ownership check
+  mass_assignment_only/        # exactly one bug: unfiltered PATCH
+.github/workflows/scan.yml  # CI: pytest, then the scanner against demo_apps/vulnerable
 ```
 
 Adding a new check means implementing the `Check` protocol (`id`, `title`,
@@ -156,7 +157,7 @@ A few decisions worth knowing about if you're reading the code:
 ## CI
 
 `.github/workflows/scan.yml` runs on every push: unit/integration tests
-first, then it boots `demo_vulnerable_api` and scans it twice — once
+first, then it boots `demo_apps/vulnerable` and scans it twice — once
 expecting the gate to **block** (the vulnerable target, asserting all
 expected finding categories are still caught — this is a regression guard
 for the checks themselves), and once expecting the gate to **pass** cleanly
@@ -170,7 +171,7 @@ red.
 - [x] Implement BOLA check (two-user auth support via `ScanContext`)
 - [x] Implement Mass Assignment check
 - [x] Implement Excessive Data Exposure check (hybrid: name + value-shape/entropy + schema conformance)
-- [x] Build `demo_vulnerable_api/` (FastAPI app with one bug per check) to
+- [x] Build `demo_apps/vulnerable/` (FastAPI app with one bug per check) to
       validate each check catches its target vulnerability
 - [x] `--public-paths` allowlist + spec-declared-public detection, to keep
       BOLA's false-positive rate honest on legitimately shared resources

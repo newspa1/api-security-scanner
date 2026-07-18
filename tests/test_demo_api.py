@@ -10,7 +10,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from demo_vulnerable_api.app import SECRET_KEY, _reset_state, app
+from demo_apps.vulnerable.app import SECRET_KEY, _reset_state, app
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ Every `# VULNERABLE:` comment marks a deliberate bug, one per scanner check:
   - PATCH /users/{id} .... applies undeclared fields (e.g. role) -> Mass Assignment
 
 DO NOT deploy this. It exists only so the scanner has something real to catch.
-Run it with:  uvicorn demo_vulnerable_api.app:app --reload
+Run it with:  uvicorn demo_apps.vulnerable.app:app --reload
 """
 
 from __future__ import annotations

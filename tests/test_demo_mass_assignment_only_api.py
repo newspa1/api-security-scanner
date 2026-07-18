@@ -1,4 +1,4 @@
-"""Correctness tests for demo_mass_assignment_only_api: proves the app has
+"""Correctness tests for demo_apps/mass_assignment_only: proves the app has
 exactly the one planted bug (PATCH /me applies an undeclared `role` field)
 and nothing else, then proves the real scanner (ALL_CHECKS) reports EXACTLY
 ONE finding -- Mass Assignment, and nothing from the other three checks."""
@@ -10,7 +10,7 @@ import pytest
 from apisec.checks import ALL_CHECKS
 from apisec.checks.base import ScanContext
 from apisec.spec_loader import extract_endpoints
-from demo_mass_assignment_only_api.app import _reset_state, app
+from demo_apps.mass_assignment_only.app import _reset_state, app
 
 
 @pytest.fixture

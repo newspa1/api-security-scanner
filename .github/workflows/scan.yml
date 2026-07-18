@@ -31,7 +31,7 @@ jobs:
 
       - name: Start the demo vulnerable API
         run: |
-          nohup uvicorn demo_vulnerable_api.app:app --port 8000 > server.log 2>&1 &
+          nohup uvicorn demo_apps.vulnerable.app:app --port 8000 > server.log 2>&1 &
           for i in $(seq 1 10); do
             curl -sf http://localhost:8000/openapi.json > /dev/null && exit 0
             sleep 1
