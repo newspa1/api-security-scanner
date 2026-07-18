@@ -28,6 +28,15 @@ concluding a forgery succeeded, we first confirm the endpoint actually
 enforces SOME auth check at all, by sending an obviously-invalid credential
 and requiring that to be rejected. If even garbage credentials get through,
 there's nothing to bypass, and we skip.
+
+CONFIRMED WORKING against a real bypass, on OWASP crAPI (github.com/OWASP/crAPI,
+see EXTERNAL_VALIDATION.md target 2 #1): 8 endpoints correctly rejected a
+garbage credential (proving auth IS enforced) yet still accepted the
+forged `alg=none` token, returning real data (other users' emails, credit
+balances, order history). This is the baseline check doing exactly its
+job -- distinguishing "no auth to bypass" (VAmPI, a false positive without
+the baseline) from "auth exists and was genuinely bypassed" (crAPI, a
+real, system-wide vulnerability), using the identical logic for both.
 """
 
 from __future__ import annotations

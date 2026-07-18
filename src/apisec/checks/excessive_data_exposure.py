@@ -46,6 +46,11 @@ _VALUE_SHAPES: list[tuple[str, re.Pattern]] = [
 ]
 _ENTROPY_MIN_LEN = 20
 _ENTROPY_THRESHOLD = 4.0  # bits/char; random-looking secrets sit above this.
+# Opaque resource identifiers (nanoid/shortid-style) are DESIGNED to look
+# random -- they pass the same entropy threshold real secrets do, but
+# they're meant to be shared, not protected. Excluded from the entropy
+# fallback only (see _value_looks_secret).
+_ID_LIKE_FIELD_PATTERN = re.compile(r"(^id$|_id$|Id$|^uuid$|^slug$)")
 
 
 @dataclass
@@ -67,15 +72,25 @@ def _shannon_entropy(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
-def _value_looks_secret(value: object) -> str | None:
+def _value_looks_secret(value: object, field_name: str = "") -> str | None:
     """Layer 2. Returns a shape label (e.g. "bcrypt-hash", "high-entropy") or
-    None. Only strings can match."""
+    None. Only strings can match. `field_name` is used only to gate the
+    entropy fallback (see below) -- the shape-regex matches below apply
+    regardless of field name, since a bcrypt hash or JWT stored under a
+    field called `id` would still be very suspicious."""
     if not isinstance(value, str):
         return None
     for label, pattern in _VALUE_SHAPES:
         if pattern.search(value):
             return label
-    # The entropy fallback requires no whitespace: real secrets (JWTs,
+    # Skip the entropy fallback for id-like field names. Found scanning
+    # crAPI (github.com/OWASP/crAPI): community post ids (nanoid-style, e.g.
+    # "XVnnBhVbD4E2Ktc2H54xDa") tripped the entropy threshold -- real false
+    # positives, since opaque resource identifiers are DESIGNED to look
+    # random but are meant to be shared, not protected.
+    if _ID_LIKE_FIELD_PATTERN.search(field_name):
+        return None
+    # The entropy fallback also requires no whitespace: real secrets (JWTs,
     # hashes, API keys) are structurally single unbroken tokens -- their
     # encodings (base64, hex, ...) never contain spaces. Prose almost always
     # does. Found scanning VAmPI (github.com/erev0s/VAmPI): a long, varied
@@ -116,7 +131,7 @@ def _collect_signals(
             reasons: list[str] = []
             if _name_looks_sensitive(key):
                 reasons.append("sensitive-name")
-            shape = _value_looks_secret(value)
+            shape = _value_looks_secret(value, field_name=key)
             if shape:
                 reasons.append(f"value-shape:{shape}")
             if prefix == "" and declared_top_level is not None and key not in declared_top_level:

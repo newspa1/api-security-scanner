@@ -103,9 +103,13 @@ That's a real, unauthenticated password leak in VAmPI's `/users/v1/_debug`
 endpoint — exit code `0` because this one scores `MEDIUM`, not `HIGH`/`CRITICAL`.
 **This isn't the whole story on purpose:** `apisec` also misses two more
 severe, confirmed-exploitable bugs in this same target (an account-takeover
-BOLA and a registration-time privilege escalation). See
+BOLA and a registration-time privilege escalation). A second, larger
+validation pass against [OWASP crAPI](https://github.com/OWASP/crAPI) found
+the opposite kind of result: a real, system-wide `alg=none` authentication
+bypass, confirmed on 8 endpoints, plus a BOLA leaking payment card data —
+and one more false-positive class in the scanner, found and fixed. See
 [`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md) for the full write-up —
-hits, misses, and two real scanner bugs that were found and fixed as a
+hits, misses, and three real scanner bugs that were found and fixed as a
 direct result of this exercise. A tool that only ever reports clean sweeps
 against itself isn't proving much; this one's report card is public.
 

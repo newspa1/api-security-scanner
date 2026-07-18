@@ -37,6 +37,19 @@ because it's a POST. This didn't change the SCOPE decision (still a bigger
 change than this pass), but it upgrades "a real follow-up" from
 hypothetical to confirmed-and-prioritized.
 
+CONFIRMED, WORSE LIMITATION found scanning OWASP crAPI (github.com/OWASP/crAPI,
+see EXTERNAL_VALIDATION.md target 2 #4): `concrete_url`'s default placeholder
+id ("1") isn't a real, accessible resource for the scanning identity on
+crAPI's order/video endpoints, and unlike `bola.py` this check has NO RETRY
+across multiple candidate ids -- one placeholder, one attempt, done. Missed
+three of crAPI's documented mass-assignment bugs as a direct result. A
+retry loop (matching bola.py's `_CANDIDATE_IDS` approach) is the more
+urgent of the two known gaps, not just id *discovery* eventually replacing
+guessing entirely. Also plausible (not proven): the candidate FIELD list
+below is privilege-escalation-flavored (role/admin/permissions), which may
+not generalize to financial/business-logic mass assignment (crAPI's real
+bugs manipulate order quantity and refund amounts, not privilege fields).
+
 Like BOLA, this is deliberately conservative: a request that just gets
 rejected outright isn't treated as "not vulnerable", it's treated as "no
 evidence either way" and skipped, so the check stays quiet rather than

@@ -68,6 +68,27 @@ def test_layer2_ignores_long_varied_prose_despite_high_entropy():
     assert _value_looks_secret(sentence) is None
 
 
+def test_layer2_ignores_high_entropy_id_like_field_names():
+    # Real false positive found scanning crAPI (github.com/OWASP/crAPI): a
+    # community post's opaque nanoid-style `id` tripped the entropy
+    # threshold. Opaque ids are DESIGNED to look random; they're meant to
+    # be shared, not protected -- not a secret leak.
+    opaque_id = "XVnnBhVbD4E2Ktc2H54xDa"
+    assert _shannon_entropy(opaque_id) >= 4.0  # sanity: this WOULD trip raw entropy
+    assert _value_looks_secret(opaque_id, field_name="id") is None
+    assert _value_looks_secret(opaque_id, field_name="post_id") is None
+    assert _value_looks_secret(opaque_id, field_name="userId") is None
+
+
+def test_layer2_shape_regex_still_fires_on_id_named_fields():
+    # The id-name exclusion only gates the entropy FALLBACK -- an
+    # unambiguous secret shape (e.g. a bcrypt hash) stored under a field
+    # literally called `id` would still be very suspicious and must still
+    # be flagged.
+    bcrypt_like = "$2b$12$abcdefghijklmnopqrstuv"
+    assert _value_looks_secret(bcrypt_like, field_name="id") == "bcrypt-hash"
+
+
 def test_shannon_entropy_ordering():
     assert _shannon_entropy("aaaaaaaa") < _shannon_entropy("A9f4Q2xZ7bV1kP0w")
 

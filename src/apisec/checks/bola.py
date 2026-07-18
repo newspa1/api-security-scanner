@@ -57,6 +57,15 @@ and take over their account. Manually confirmed exploitable (full account
 takeover). Both follow-ups above (id discovery, write-based BOLA) would be
 needed to catch this specific bug; upgrades it from a hypothetical gap to a
 confirmed, prioritized one.
+
+WORKING as intended, confirmed against OWASP crAPI (github.com/OWASP/crAPI,
+see EXTERNAL_VALIDATION.md target 2 #2): with real, sequential-integer
+order ids (crAPI's `POST /workshop/api/shop/orders` returns them), this
+check correctly found and reported a real BOLA -- user B reading user A's
+complete order, including masked payment card details -- with zero
+target-specific code. The `["1".."5"]` guessing strategy's blind spot is
+specifically non-sequential (username/UUID/slug) keys, not id-addressable
+resources in general.
 """
 
 from __future__ import annotations
