@@ -31,6 +31,7 @@ def scan(
         session_a=session_a,
         session_b=session_b,
         public_paths=public_paths or [],
+        all_endpoints=endpoints,
     )
 
     findings: list[Finding] = []

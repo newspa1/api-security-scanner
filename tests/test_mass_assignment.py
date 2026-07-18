@@ -8,28 +8,11 @@ integration test proving it against the real demo API spec end-to-end.
 from __future__ import annotations
 
 from apisec.checks.base import ScanContext
-from apisec.checks.mass_assignment import MassAssignmentCheck, _build_legit_payload
+from apisec.checks.mass_assignment import MassAssignmentCheck
 from apisec.spec_loader import Endpoint, extract_endpoints
 
-
-# ---- _build_legit_payload (pure function) -------------------------------------
-
-def test_build_legit_payload_fills_declared_properties_by_type():
-    schema = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-            "active": {"type": "boolean"},
-        },
-    }
-    payload = _build_legit_payload(schema)
-    assert payload == {"name": "apisec-test", "age": 1, "active": True}
-
-
-def test_build_legit_payload_handles_missing_schema():
-    assert _build_legit_payload(None) == {}
-    assert _build_legit_payload({}) == {}
+# build_legit_payload is now a shared helper in checks/base.py -- see
+# test_checks_base.py for its unit tests.
 
 
 # ---- decision logic, using a fake stateful session ----------------------------
@@ -124,6 +107,77 @@ def test_post_method_is_skipped():
     session = _FakeSession({}, accept_fields=None)
     ctx = ScanContext(base_url="http://x", session_a=session)
     assert MassAssignmentCheck().run(ep, ctx) == []
+
+
+# ---- id-retry logic, using an id-aware fake session ---------------------------
+
+class _FakeIdAwareSession:
+    """Unlike _FakeSession above, this one discriminates by which candidate
+    id is in the URL: writes to ids NOT in `accessible_ids` are rejected
+    outright (simulating 'not a real/accessible resource for this
+    identity'), so the retry loop actually has something to retry past."""
+
+    def __init__(self, accessible_ids, accept_fields=None):
+        self.accessible_ids = accessible_ids
+        self.accept_fields = accept_fields
+        self.state_by_id: dict[str, dict] = {}
+        self.write_urls: list[str] = []
+
+    @staticmethod
+    def _id_from_url(url: str) -> str:
+        return url.rsplit("/", 1)[-1]
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        self.write_urls.append(url)
+        cid = self._id_from_url(url)
+        if cid not in self.accessible_ids:
+            return _FakeResponse(403)
+        state = self.state_by_id.setdefault(cid, {})
+        payload = json or {}
+        if self.accept_fields is None:
+            state.update(payload)
+        else:
+            for key, value in payload.items():
+                if key in self.accept_fields:
+                    state[key] = value
+        return _FakeResponse(200, dict(state))
+
+    def get(self, url, timeout=5, **kwargs):
+        cid = self._id_from_url(url)
+        if cid not in self.accessible_ids:
+            return _FakeResponse(404)
+        return _FakeResponse(200, dict(self.state_by_id.get(cid, {})))
+
+
+def test_tries_next_candidate_id_when_first_is_not_writable():
+    # id "1" and "2" are not real/accessible resources; "3" is. The baseline
+    # legit-only write must skip past 1 and 2 before locking onto 3.
+    session = _FakeIdAwareSession(accessible_ids={"3"}, accept_fields=None)
+    ctx = ScanContext(base_url="http://x", session_a=session)
+
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+
+    assert len(findings) == 1
+    assert "id=3" in findings[0].evidence
+    assert "role" in findings[0].evidence
+    # confirms candidates 1 and 2 really were tried and rejected, not skipped
+    assert any(url.endswith("/1") for url in session.write_urls)
+    assert any(url.endswith("/2") for url in session.write_urls)
+
+
+def test_no_finding_when_no_candidate_id_is_ever_writable():
+    session = _FakeIdAwareSession(accessible_ids=set(), accept_fields=None)
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
+
+
+def test_no_finding_when_locked_in_id_has_secure_handler():
+    # id "1" is real/writable, but the handler only applies the allowlisted
+    # `name` field -- the retry loop correctly locks onto id 1 (no need to
+    # try further ids), and the secure handler correctly produces no finding.
+    session = _FakeIdAwareSession(accessible_ids={"1"}, accept_fields={"name"})
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
 
 
 # ---- integration: against the real demo API spec + a live identity -----------

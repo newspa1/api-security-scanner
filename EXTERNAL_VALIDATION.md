@@ -170,14 +170,30 @@ access this sandbox didn't have at the time). Rather than just re-confirming
   a second identity, a candidate id, or any of BOLA's machinery — just a
   single crafted registration request.
 
-Net effect: `apisec` currently misses VAmPI's two most severe, most
+Net effect (at the time): `apisec` missed VAmPI's two most severe, most
 directly exploitable bugs (self-registered admin; cross-user account
 takeover) while correctly catching the one it's structurally built to
 catch (the unauthenticated debug leak, §1) and correctly staying silent on
-what it's not built to catch (§5). Both gaps trace to the same two design
+what it's not built to catch (§5). Both gaps traced to the same two design
 decisions — integer-only id guessing, and POST excluded from Mass
 Assignment — both already documented as MVP scope boundaries, now with
 concrete proof of what they cost in a real API.
+
+**Re-checked after adding id discovery (see crAPI target's §4): still
+unresolved here, for an instructive reason.** `discover_resource_id()`
+creates a resource via a sibling POST and reads its id back from the
+response — but VAmPI's `POST /users/v1/register` responds with
+`{"message": "...", "status": "..."}`, no id field at all, because the
+identifier (username) is something the *caller* chose when registering,
+not something the *server* generates and hands back. Re-scanned VAmPI
+after adding discovery: the result is byte-for-byte identical to before.
+This is a genuinely different failure mode from crAPI's (where discovery
+worked perfectly) — id discovery only helps when the create response
+actually contains a server-generated id to extract; a client-chosen
+identifier needs a different mechanism entirely (the check would need to
+remember what it submitted, not read a response). This account-takeover
+bug still needs write-based BOLA specifically, and it's now the clearest
+concrete argument for building it.
 
 #### 4c. A legitimate critique of the severity model
 
@@ -221,9 +237,9 @@ implements. Not finding it is correct, not a miss.
 | Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (MEDIUM — arguably under-scored, §4c) | True positive, first try |
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
-| Unauthorized password change (account takeover) | ❌ **Missed** — confirmed exploitable | Candidate-id guessing (1-5) doesn't fit username keys |
+| Unauthorized password change (account takeover) | ❌ **Still missed** — id discovery doesn't help here | Username is client-chosen; register response has no id to extract (§4b) |
 | Registration-time privilege escalation (`admin: true`) | ❌ **Missed** — confirmed exploitable | Mass Assignment excludes POST by design (MVP scope) |
-| BOLA (`/users/v1/{username}` reads) | ❌ **Missed** | Same id-guessing root cause |
+| BOLA (`/users/v1/{username}` reads) | ❌ **Still missed** — same reason | Same client-chosen-identifier limitation |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
 
@@ -359,7 +375,7 @@ stored under a field literally called `id` would still be flagged; that's
 tested explicitly. Re-scanned: this false positive is gone; every other
 finding is unchanged.
 
-#### 4. Confirmed limitation, same root cause as VAmPI §4, one layer worse
+#### 4. Confirmed limitation, then two follow-up fixes, then one remaining gap
 
 Mass Assignment produced zero findings, despite crAPI documenting three
 mass-assignment bugs (free items via order-return manipulation, balance
@@ -370,20 +386,50 @@ endpoints that are exactly its target shape
 manually: order id `"1"` (the default placeholder `concrete_url` produces)
 returns `403 You are not allowed to access this resource!` for our test
 user, while the real order we created (id `6`) returns `200` — but
-`mass_assignment.py` has **no retry loop at all** (unlike `bola.py`'s
-5-candidate attempt), so it never gets past the first placeholder id. This
-is a strictly worse version of VAmPI §4's limitation: BOLA at least tries
-five candidates before giving up; Mass Assignment tries exactly one.
+`mass_assignment.py` had **no retry loop at all** (unlike `bola.py`'s
+5-candidate attempt), so it never got past the first placeholder id.
 
-A second, independent limitation is also plausible here (not fully
-exploited, so held to a lower confidence than the items above): crAPI's
-actual mass-assignment bugs manipulate *business/financial* fields
-(quantity, refund amount, internal video flags), not the *privilege*
-fields (`role`, `is_admin`, `admin`, `permissions`) our candidate list
-targets. Even with perfect id discovery, today's fixed candidate-field
-list is tuned for privilege escalation and may not generalize to
-financial-fraud-flavored mass assignment — worth confirming with a full
-exploit reproduction in a future pass, not claimed as proven here.
+**Fix 1 — a retry loop, matching `bola.py`'s approach.** Added a
+legit-only baseline write per candidate id (`["1".."5"]`), locking onto
+the first one that isn't rejected outright. Re-scanning crAPI after this
+fix: still zero findings — the real order this check needed had id `7`,
+past the 5-candidate range, because the target's database had already
+drifted from earlier test runs. A wider guess range just moves the
+goalposts; a live database can always drift past it.
+
+**Fix 2 — real id discovery, not guessing.** Added
+`discover_resource_id()` (`checks/base.py`, shared with `bola.py`): find a
+sibling `POST` on the same collection path, create a resource with a
+legit payload, and read the real id back from the response — tried before
+falling back to numeric guessing. Re-scanning crAPI again: discovery
+correctly found and used order id `9` (still past the old guess range) —
+confirmed via the request log, not just inferred. This is a materially
+different mechanism from "try more candidates": it doesn't need to guess
+how far a live database has drifted, because it just asks the API what a
+real id looks like.
+
+**One gap remains, confirmed even with the correct id in hand.** With a
+real, writable order id now found on every scan, Mass Assignment *still*
+reports nothing here — because crAPI's real mass-assignment bug
+manipulates *business/financial* fields (order quantity, refund amount),
+not the *privilege* fields (`role`, `is_admin`, `admin`, `permissions`)
+our candidate list targets. Confirmed directly: crAPI's order response has
+no place for a `role` field to even appear, so no candidate field we try
+could ever "stick." This is now the sole remaining known gap for this
+check — id discovery solved the "can't find a real resource" problem
+completely; a config surface for target-specific candidate fields (or
+business-logic-flavored defaults) is the natural next step, not attempted
+here.
+
+**Id discovery also found a SECOND BOLA, invisible to any amount of
+numeric guessing.** Re-scanning crAPI with discovery in place surfaced a
+new finding: `GET /community/api/v2/community/posts/{postId}`. Discovery
+created a real post via `POST /community/api/v2/community/posts` and
+extracted its real id from the response — a nanoid-style string (e.g.
+`"6gfDwUFSkXWx255aTjireV"`), not a number. `["1".."5"]` guessing could
+never have found this regardless of how many candidates it tried, because
+the id space isn't sequential integers at all. Confirmed as a real BOLA
+the same way as §2: user B's own token reads user A's post.
 
 #### 5. Out of scope, correctly not claimed
 
@@ -397,10 +443,12 @@ about any of them.
 | crAPI's documented challenge | Result | Why |
 |---|---|---|
 | JWT forgery (#15) | ✅ **Caught** (CRITICAL, x8 endpoints) | True positive — real, system-wide `alg=none` bypass |
-| BOLA — order/payment access (#1-ish) | ✅ **Caught** (HIGH) | True positive — confirmed exploitable, incl. payment data |
+| BOLA — order/payment access | ✅ **Caught** (HIGH) | True positive — confirmed exploitable, incl. payment data |
+| BOLA — community posts (non-numeric ids) | ✅ **Caught** (HIGH, after id discovery) | Id discovery found a real nanoid-style post id; numeric guessing never could have |
 | Opaque-id entropy false positive | 🔧 **Found & fixed in apisec** | Entropy fallback now excludes id-like field names |
-| Mass assignment (#8, #9, #10) | ❌ **Missed** | `mass_assignment.py` has no id-retry at all (worse than BOLA's) |
-| BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Same id-guessing limitation, not separately exploited |
+| Mass assignment id-not-found (#8, #9, #10) | 🔧 **Found & fixed in apisec** | Retry loop, then real id discovery — both added and confirmed working |
+| Mass assignment field mismatch (#8, #9, #10) | ❌ **Still missed** | Candidate fields are privilege-flavored; crAPI's bug is quantity/refund-flavored |
+| BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Not separately exploited to confirm |
 | Broken auth via password reset (#3) | — Not tested | Different flow than `alg=none` forgery |
 | SSRF / SQLi / NoSQLi / rate limiting / BFLA / LLM (#6, #7, #11-18) | — Out of scope | Not implemented; different OWASP/AI-security categories |
 
@@ -412,35 +460,62 @@ about any of them.
   it correctly caught real, confirmed vulnerabilities with zero
   target-specific code — including one severe, system-wide auth bypass
   (crAPI) that would matter in a real security review.
-- **Three distinct false-positive classes were found and fixed**, each a
+- **Four distinct false-positive classes were found and fixed**, each a
   different flavor: prose mistaken for a secret (VAmPI), an endpoint with
-  no real auth check mistaken for a bypassed one (VAmPI), and an opaque
-  resource id mistaken for a secret (crAPI). None were special-cased for
-  the target that found them — all three fixes are general.
-- **The same root cause explains every confirmed miss**: both BOLA and
-  Mass Assignment only guess sequential integer ids, and Mass Assignment
-  doesn't even retry across candidates. Every miss on both targets traces
-  back to this one design boundary, already documented as an MVP scope
-  decision before either target was tested — external validation turned it
-  from a theoretical gap into two confirmed, exploitable ones (VAmPI
-  account takeover; crAPI mass-assignment blindness).
+  no real auth check mistaken for a bypassed one (VAmPI), an opaque
+  resource id mistaken for a secret (crAPI), and a fixed id-guess range
+  that couldn't keep up with a live database (crAPI, fixed by discovery
+  rather than a wider range). None were special-cased for the target that
+  found them — all fixes are general.
+- **The two originally-confirmed misses had genuinely different root
+  causes, and that mattered.** BOLA/Mass Assignment's sequential-integer
+  guessing looked like one problem from the outside, but turned out to be
+  two: (1) resources whose real id is simply outside a small guessed
+  range — fixed by `discover_resource_id()`, confirmed working on crAPI's
+  orders (id 9) and, as a bonus, a second BOLA on non-numeric community
+  post ids that guessing could never have found at all; (2) resources
+  identified by something the *client* chose (VAmPI's usernames) rather
+  than something the *server* generates — id discovery structurally
+  cannot help here, confirmed by an unchanged VAmPI re-scan. Only the
+  first kind was closed this pass.
+- **Fixing the "can't find a resource" problem exposed a second, more
+  precise gap sitting right behind it**: crAPI's Mass Assignment check now
+  reliably finds a real, writable order — and still reports nothing,
+  because the *fields* it tries (privilege-escalation-flavored) don't
+  match crAPI's actual vulnerable fields (quantity/refund-flavored). This
+  is the kind of gap that's easy to miss until the more obvious problem in
+  front of it is actually solved.
 
 ## Future work
 
-- **Id discovery instead of id guessing** for BOLA/Mass Assignment (register
-  or create a resource as user A, read its real id back from the response)
-  — the single highest-leverage fix; closes the account-takeover and BOLA
-  gaps in VAmPI and the mass-assignment gap in crAPI at once, and
-  generalizes to any UUID- or slug-keyed API.
-- **A retry loop for Mass Assignment**, matching BOLA's candidate-id
-  approach — currently the weaker of the two (zero retries vs. five).
+- ~~Id discovery instead of id guessing~~ — **done.** `discover_resource_id()`
+  (`checks/base.py`) creates a real resource via a sibling POST and reads
+  its id back, tried before falling back to numeric guessing. Confirmed
+  working on crAPI (found order id 9, and a second, non-numeric BOLA on
+  community posts); confirmed NOT sufficient for VAmPI's client-chosen
+  usernames (see below).
+- ~~A retry loop for Mass Assignment~~ — **done**, then found insufficient
+  alone, which is what motivated id discovery above.
+- **Recovering client-chosen identifiers** — the harder half of "id
+  discovery." When a resource's id is something the caller supplies at
+  creation time (VAmPI's usernames) rather than something the server
+  generates, there's no id to extract from the create response; the check
+  would need to remember what it submitted instead. Would close VAmPI's
+  account-takeover gap if combined with write-based BOLA below.
+- **Write-based BOLA** (PATCH/DELETE/PUT another user's object, not just
+  GET) — VAmPI's account-takeover bug specifically needs this combined
+  with the item above; still not attempted.
 - **Mass Assignment on POST** (resource creation) — would close the
   VAmPI registration privilege-escalation gap. Needs a way to find the
-  created resource back (response body or `Location` header), a different
-  problem from "read the same URL," which is why it was deferred.
+  created resource back (response body or `Location` header) — note
+  `discover_resource_id()` already does exactly this for a *different*
+  purpose (finding an id to test), so extending Mass Assignment to test
+  the POST response itself for injected fields is a smaller lift now than
+  when this was originally scoped out.
 - **A broader Mass Assignment candidate-field list**, or a config surface
   for target-specific fields — today's list is privilege-escalation-flavored
-  and may miss financial/business-logic mass assignment (crAPI §4).
+  and confirmed to miss financial/business-logic mass assignment (crAPI
+  §4) even with the correct resource id in hand.
 - **Re-weight severity by reachability**, not just detection-signal count
   (VAmPI §4c) — an unauthenticated leak should plausibly outscore an
   authenticated one with otherwise-identical evidence.

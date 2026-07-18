@@ -13,10 +13,17 @@ ALGORITHM:
 2. Build a "legitimate" payload from `endpoint.request_body_schema`'s
    declared properties (a plausible placeholder value per JSON Schema type),
    so the request has a real chance of passing basic validation.
-3. For each candidate privileged field NOT in the declared schema (role,
-   is_admin, permissions, ...), add it to the payload with a privileged
-   value and send the write.
-4. GET the same URL back and check whether the injected field's value
+3. Find a real, writable resource: for each candidate id (same
+   `_CANDIDATE_IDS` list bola.py uses), send the LEGIT-only payload (no
+   injected field) to that id. The first one that doesn't get rejected
+   outright (< 400) is treated as "a real resource user A can write to" and
+   locked in -- stop trying further ids. If none work, there's nothing to
+   test; return no findings rather than guessing against a resource that
+   was never confirmed to exist.
+4. Against that one locked-in id: for each candidate privileged field NOT
+   in the declared schema (role, is_admin, permissions, ...), add it to the
+   legit payload and send the write.
+5. GET the same URL back and check whether the injected field's value
    actually stuck. If it did, the handler is binding the raw request body
    onto its model instead of an explicit allowlist of writable fields --
    that's the finding. A field that's rejected, ignored, or the request
@@ -37,18 +44,38 @@ because it's a POST. This didn't change the SCOPE decision (still a bigger
 change than this pass), but it upgrades "a real follow-up" from
 hypothetical to confirmed-and-prioritized.
 
-CONFIRMED, WORSE LIMITATION found scanning OWASP crAPI (github.com/OWASP/crAPI,
-see EXTERNAL_VALIDATION.md target 2 #4): `concrete_url`'s default placeholder
-id ("1") isn't a real, accessible resource for the scanning identity on
-crAPI's order/video endpoints, and unlike `bola.py` this check has NO RETRY
+FIXED after being found scanning OWASP crAPI (github.com/OWASP/crAPI, see
+EXTERNAL_VALIDATION.md target 2 #4): `concrete_url`'s default placeholder
+id ("1") wasn't a real, accessible resource for the scanning identity on
+crAPI's order/video endpoints, and unlike `bola.py` this check had NO RETRY
 across multiple candidate ids -- one placeholder, one attempt, done. Missed
-three of crAPI's documented mass-assignment bugs as a direct result. A
-retry loop (matching bola.py's `_CANDIDATE_IDS` approach) is the more
-urgent of the two known gaps, not just id *discovery* eventually replacing
-guessing entirely. Also plausible (not proven): the candidate FIELD list
-below is privilege-escalation-flavored (role/admin/permissions), which may
-not generalize to financial/business-logic mass assignment (crAPI's real
-bugs manipulate order quantity and refund amounts, not privilege fields).
+three of crAPI's documented mass-assignment bugs as a direct result. Now
+retries across `_CANDIDATE_IDS` with a legit-only baseline write per id
+(step 3 above), same shape as bola.py's approach.
+
+STILL NOT ENOUGH with retries alone, confirmed by re-scanning crAPI after
+the retry fix above: the order this check needed to write to had id 7 --
+past the `["1".."5"]` guess range, because the target's id sequence had
+already advanced from earlier testing. A wider guess range just moves the
+goalposts; a live database can always drift past it. Now tries
+`discover_resource_id()` first (base.py) -- create a real resource via a
+sibling POST, read its real id back -- with the numeric guesses kept as a
+fallback when discovery doesn't work (no sibling POST, or the response has
+no recognizable id). Re-scanning crAPI again confirmed discovery reaching
+a real order (id 9, still past the guess range) reliably.
+
+ONE LIMITATION REMAINS, confirmed on that same crAPI re-scan (still zero
+Mass Assignment findings even with the right resource id in hand): the
+candidate FIELD list below is privilege-escalation-flavored
+(role/admin/permissions), which doesn't generalize to financial/business-
+logic mass assignment. crAPI's real bugs manipulate order quantity and
+refund amounts, not privilege fields -- confirmed crAPI's order response
+has no place for a `role` field to even appear, so a perfectly-discovered
+id still won't catch that specific bug with today's candidate list. This
+is now the sole remaining known gap for this check (id discovery closed
+the other one) -- a config surface for target-specific candidate fields,
+or business-logic-flavored defaults (quantity, amount, price, balance),
+would be the natural next step.
 
 Like BOLA, this is deliberately conservative: a request that just gets
 rejected outright isn't treated as "not vulnerable", it's treated as "no
@@ -60,8 +87,17 @@ from __future__ import annotations
 
 import requests
 
-from apisec.checks.base import Finding, ScanContext, Severity, concrete_url
+from apisec.checks.base import (
+    Finding,
+    ScanContext,
+    Severity,
+    build_legit_payload,
+    concrete_url,
+    discover_resource_id,
+)
 from apisec.spec_loader import Endpoint
+
+_CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
 
 _CANDIDATE_PRIVILEGE_FIELDS: list[tuple[str, object]] = [
     ("role", "admin"),
@@ -71,31 +107,16 @@ _CANDIDATE_PRIVILEGE_FIELDS: list[tuple[str, object]] = [
     ("permissions", ["admin"]),
 ]
 
-_TYPE_PLACEHOLDERS: dict[str, object] = {
-    "string": "apisec-test",
-    "integer": 1,
-    "number": 1.0,
-    "boolean": True,
-    "array": [],
-    "object": {},
-}
 
-
-def _build_legit_payload(schema: dict | None) -> dict:
-    """A minimal, plausible request body from the schema's declared
-    properties -- one placeholder value per property, picked by JSON Schema
-    `type`. Doesn't attempt to satisfy stricter rules (enum, min_length,
-    formats, ...); good enough to usually clear basic type validation."""
-    if not schema or not isinstance(schema, dict):
-        return {}
-    props = schema.get("properties", {})
-    if not isinstance(props, dict):
-        return {}
-    payload = {}
-    for name, prop_schema in props.items():
-        prop_type = prop_schema.get("type") if isinstance(prop_schema, dict) else None
-        payload[name] = _TYPE_PLACEHOLDERS.get(prop_type, "apisec-test")
-    return payload
+def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
+    """A real, discovered id (if one can be found) tried first, then the
+    numeric guesses as a fallback -- mirrors bola.py's approach."""
+    discovered = discover_resource_id(endpoint, ctx)
+    if discovered is None:
+        return _CANDIDATE_IDS
+    if discovered in _CANDIDATE_IDS:
+        return _CANDIDATE_IDS
+    return [discovered, *_CANDIDATE_IDS]
 
 
 class MassAssignmentCheck:
@@ -115,8 +136,24 @@ class MassAssignmentCheck:
         if not candidates:
             return []
 
-        legit_payload = _build_legit_payload(endpoint.request_body_schema)
-        url = concrete_url(endpoint.path, ctx.base_url)
+        legit_payload = build_legit_payload(endpoint.request_body_schema)
+
+        url = None
+        used_id = None
+        for candidate_id in _candidate_ids_for(endpoint, ctx):
+            candidate_url = concrete_url(endpoint.path, ctx.base_url, candidate_id)
+            try:
+                baseline_resp = ctx.session_a.request(
+                    endpoint.method, candidate_url, json=legit_payload, timeout=5
+                )
+            except requests.RequestException:
+                continue
+            if baseline_resp.status_code < 400:
+                url = candidate_url
+                used_id = candidate_id
+                break  # found a real, writable resource for A; stop guessing ids
+        if url is None:
+            return []  # no candidate id was ever a real, writable resource
 
         confirmed: list[str] = []
         for field_name, injected_value in candidates:
@@ -158,6 +195,7 @@ class MassAssignmentCheck:
                     "raw request body onto its model instead of an explicit "
                     "allowlist of writable fields."
                 ),
-                evidence=f"Undeclared field(s) accepted and persisted: {', '.join(confirmed)}",
+                evidence=f"id={used_id}: undeclared field(s) accepted and persisted: "
+                f"{', '.join(confirmed)}",
             )
         ]
