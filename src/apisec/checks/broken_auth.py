@@ -7,8 +7,13 @@ the first place — an attacker can forge arbitrary claims (different user
 id, elevated role, ...) without knowing any secret.
 
 This is a real, working check meant as the reference implementation for the
-other (stubbed) checks in this package — see bola.py / mass_assignment.py /
-excessive_data_exposure.py for the pattern to follow.
+other checks in this package — see bola.py / mass_assignment.py /
+excessive_data_exposure.py for the pattern to follow, including the same
+`endpoint.security == []` guard used here: an endpoint the spec explicitly
+declares needs no auth at all will trivially "accept" a forged token too
+(it accepts ANY token, or none), which isn't a bypass of anything -- there
+was no signature verification to bypass in the first place. Same false
+positive class BOLA has to guard against, same fix.
 """
 
 from __future__ import annotations
@@ -43,6 +48,9 @@ class BrokenAuthCheck:
     title = "Broken Authentication - JWT alg=none bypass"
 
     def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
+        if endpoint.security == []:
+            return []  # spec explicitly declares this endpoint needs no auth
+
         session = ctx.session_a
         auth_header = session.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
