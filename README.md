@@ -46,16 +46,29 @@ pip install -e ".[dev]"
 Rather than take it on faith, try the scanner against a real, well-known
 target before pointing it at your own API. [VAmPI](https://github.com/erev0s/VAmPI)
 is a small, MIT-licensed Flask API built specifically to evaluate tools like
-this one — a good five-minute sanity check:
+this one — a good five-minute sanity check. Four steps, in order:
+
+**1. In one terminal, get VAmPI and start it running in the foreground —
+leave this terminal open, it's your server log:**
 
 ```bash
 git clone https://github.com/erev0s/VAmPI.git && cd VAmPI
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-vulnerable=1 python3 app.py &          # runs on :5000
+vulnerable=1 python3 app.py            # runs on :5000, stays in the foreground
+```
 
-curl -s http://localhost:5000/createdb  # seed the database
+**2. In a second terminal, seed the database:**
 
+```bash
+curl -s http://localhost:5000/createdb
+```
+
+**3. Still in the second terminal, register two accounts and log in as
+both — `apisec` needs two identities to test BOLA (comparing what different
+users can each reach):**
+
+```bash
 curl -s -X POST http://localhost:5000/users/v1/register -H 'Content-Type: application/json' \
   -d '{"username":"scanuser1","password":"ScanPass1!","email":"a@tempmail.com"}'
 curl -s -X POST http://localhost:5000/users/v1/register -H 'Content-Type: application/json' \
@@ -63,8 +76,12 @@ curl -s -X POST http://localhost:5000/users/v1/register -H 'Content-Type: applic
 
 TOKEN_A=$(curl -s -X POST http://localhost:5000/users/v1/login -H 'Content-Type: application/json' -d '{"username":"scanuser1","password":"ScanPass1!"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['auth_token'])")
 TOKEN_B=$(curl -s -X POST http://localhost:5000/users/v1/login -H 'Content-Type: application/json' -d '{"username":"scanuser2","password":"ScanPass2!"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['auth_token'])")
+```
 
-# from wherever apisec-scanner is installed:
+**4. Still in the second terminal, run the scan** (from wherever
+apisec-scanner is installed — activate its own venv here, not VAmPI's):
+
+```bash
 apisec --spec http://localhost:5000/openapi.json --target http://localhost:5000 \
   --auth-header "Bearer $TOKEN_A" --auth-header-b "Bearer $TOKEN_B"
 ```
