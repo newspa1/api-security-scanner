@@ -28,15 +28,22 @@ from demo_apps.vulnerable.app import app as vulnerable_app
 
 # Each target: (app, its _reset_state, expected finding count, expected set of
 # (check_id, title) pairs -- distinct bug TYPES, not instances. BOLA fires
-# once each on /users and /orders in the vulnerable app, same (id, title), so
-# it collapses to one entry here; `expected_count` is what catches that.
+# three times in the vulnerable app (/users, /orders, /orders/{id}/receipt),
+# same (id, title) each time, so it collapses to one entry here;
+# `expected_count` is what catches that. The receipt endpoint's total lack of
+# auth is a real, legitimate double-hit: no auth check at all is BOTH a
+# Missing Authentication finding AND a BOLA (literally anyone can read any
+# order's receipt, which is trivially "two identities can read the same
+# object") -- not a bug in either check, both are correctly describing the
+# same root cause from two different angles.
 TARGETS = [
     pytest.param(
         vulnerable_app,
         reset_vulnerable,
-        5,
+        7,
         {
             ("API2:2023", "Broken Authentication - JWT alg=none bypass"),
+            ("API2:2023", "Broken Authentication - No Authentication Required"),
             ("API1:2023", "Broken Object Level Authorization (BOLA)"),
             ("API3:2023", "Excessive Data Exposure"),
             ("API3:2023", "Mass Assignment"),

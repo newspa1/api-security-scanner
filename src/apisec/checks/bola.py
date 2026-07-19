@@ -93,33 +93,17 @@ discovery doesn't need to guess how far.
 
 from __future__ import annotations
 
-import fnmatch
-
 import requests
 
 from apisec.checks.base import (
     Finding,
     ScanContext,
     Severity,
+    _candidate_ids_for,
+    _matches_public_path,
     concrete_url,
-    discover_resource_id,
 )
 from apisec.spec_loader import Endpoint
-
-_CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
-
-
-def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
-    """A real, discovered id (if one can be found) tried first, then the
-    numeric guesses as a fallback -- discovery can fail silently (no sibling
-    POST, POST rejected, no id in the response), so guessing stays as a
-    safety net rather than being replaced outright."""
-    discovered = discover_resource_id(endpoint, ctx)
-    if discovered is None:
-        return _CANDIDATE_IDS
-    if discovered in _CANDIDATE_IDS:
-        return _CANDIDATE_IDS
-    return [discovered, *_CANDIDATE_IDS]
 
 
 class BolaCheck:
@@ -184,7 +168,3 @@ class BolaCheck:
 
 def _has_id_path_param(path: str) -> bool:
     return "{" in path and "}" in path
-
-
-def _matches_public_path(path: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)

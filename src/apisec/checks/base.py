@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -185,6 +186,30 @@ def find_item_endpoint_for_payload(
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             return candidate_endpoint, str(value)
     return None, None
+
+
+def _matches_public_path(path: str, patterns: list[str]) -> bool:
+    """Shared by bola.py and missing_auth.py: does `path` match one of the
+    operator-supplied `--public-paths` glob patterns (`ctx.public_paths`)?"""
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+
+_CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
+
+
+def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
+    """A real, discovered id (if one can be found) tried first, then the
+    numeric guesses as a fallback -- discovery can fail silently (no sibling
+    POST, POST rejected, no id in the response), so guessing stays as a
+    safety net rather than being replaced outright. Shared by bola.py,
+    mass_assignment.py, and missing_auth.py -- all three need "a real,
+    writable/readable id to test against", not just any placeholder."""
+    discovered = discover_resource_id(endpoint, ctx)
+    if discovered is None:
+        return _CANDIDATE_IDS
+    if discovered in _CANDIDATE_IDS:
+        return _CANDIDATE_IDS
+    return [discovered, *_CANDIDATE_IDS]
 
 
 def discover_resource_id(endpoint: Endpoint, ctx: ScanContext) -> str | None:

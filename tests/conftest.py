@@ -23,7 +23,15 @@ class TestClientSession:
         path = url.replace("http://testserver", "")
         merged = dict(self.headers)
         if headers:
-            merged.update(headers)
+            # Mirror requests.Session's per-call convention: a header value
+            # of None means "drop this session-level header for this one
+            # call" (used by missing_auth.py to test with no Authorization
+            # header at all), not "send a null header value".
+            for key, value in headers.items():
+                if value is None:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
         return self.client.request(method, path, headers=merged, **kwargs)
 
 

@@ -37,6 +37,7 @@ Orders: order `1` belongs to user A, order `2` belongs to user B.
 | Endpoint | Bug | OWASP check |
 |---|---|---|
 | `POST /login` + auth | JWT signature verification disabled → `alg=none` forged tokens accepted | Broken Authentication (API2) |
+| `GET /orders/{id}/receipt` | no auth check at all — not even a garbage/invalid token required | Missing Authentication (API2) |
 | `GET /users/{id}` | returns `password_hash` in the body | Excessive Data Exposure (API3) |
 | `GET /users/{id}` | no ownership check — any user can read any id | BOLA (API1) |
 | `GET /orders/{id}` | no ownership check | BOLA (API1) |
@@ -44,6 +45,12 @@ Orders: order `1` belongs to user A, order `2` belongs to user B.
 
 `GET /me` is deliberately **clean** (no `password_hash`) so the Excessive Data
 Exposure check has exactly one true positive to find (`/users/{id}`).
+
+`GET /orders/{id}/receipt` is a real, legitimate double-hit, not two bugs
+double-counted: skipping auth entirely means literally anyone can read any
+order's receipt, which is BOTH "no authentication required" AND "two
+identities can read the same object" (BOLA) — the same root cause,
+correctly described from two different angles.
 
 Each bug is marked with a `# VULNERABLE:` comment in `app.py`.
 

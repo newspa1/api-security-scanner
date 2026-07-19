@@ -20,6 +20,7 @@ breaks."
 | Check | OWASP ID |
 |---|---|
 | Broken Authentication (JWT `alg=none` forgery) | API2:2023 |
+| Broken Authentication (no auth required at all) | API2:2023 |
 | Broken Object Level Authorization (BOLA) | API1:2023 |
 | Excessive Data Exposure | API3:2023 |
 | Mass Assignment | API3:2023 |
@@ -162,6 +163,7 @@ src/apisec/
   checks/
     base.py         # Check protocol, ScanContext, Finding, concrete_url() helper
     broken_auth.py   # API2 — JWT alg=none
+    missing_auth.py   # API2 — no Authorization header required at all
     bola.py           # API1 — two-identity cross-access diff
     mass_assignment.py         # API3 (write facet) — undeclared-field injection
     excessive_data_exposure.py # API3 (read facet) — hybrid 3-layer detection
@@ -190,26 +192,41 @@ A few decisions worth knowing about if you're reading the code:
 - **A rejected write/read is never treated as "safe."** Both BOLA and Mass
   Assignment treat a 4xx as "no evidence either way" and keep looking, rather
   than concluding an endpoint is secure from one failed probe.
-- **BOLA and Mass Assignment currently only guess sequential-integer ids**
-  (`"1".."5"`), not UUIDs or usernames — a known, documented scope boundary
-  that has a confirmed real cost, not just a theoretical one. See
-  [`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md).
+- **BOLA, Mass Assignment, and the missing-auth check try a real,
+  discovered id first** (create a resource, read its id back), falling back
+  to guessing `"1".."5"` only when discovery doesn't work — needed for
+  UUID-/nanoid-keyed resources, which a fixed guess range can never reach.
+  See [`EXTERNAL_VALIDATION.md`](EXTERNAL_VALIDATION.md) for a real id that
+  guessing missed and discovery found.
 
 ## Roadmap
 
-**MVP** ✅ done — all four checks implemented and validated, including
-against an independent third-party API (see `EXTERNAL_VALIDATION.md`).
-`--public-paths` allowlist keeps BOLA's false-positive rate honest on
-legitimately shared resources. CI runs the full suite plus a live
-two-directional scan gate on every push.
+**MVP** ✅ done — the original four checks implemented and validated,
+including against an independent third-party API (see
+`EXTERNAL_VALIDATION.md`). `--public-paths` allowlist keeps BOLA's
+false-positive rate honest on legitimately shared resources. CI runs the
+full suite plus a live two-directional scan gate on every push.
+
+**Since MVP, all confirmed working against real, independent targets (not
+just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
+- ✅ Id *discovery* (not guessing) for BOLA/Mass Assignment — creates a real
+      resource and reads its id back, instead of guessing `"1".."5"`, so
+      UUID-/nanoid-keyed resources are reachable too
+- ✅ Mass Assignment on `POST` (resource creation), not just `PATCH`/`PUT`
+- ✅ Mass Assignment confidence tiers (CONFIRMED/SUSPECTED/CLEAR) — an
+      accepted-but-unprovable field write is reported as a low-confidence
+      lead instead of staying silent
+- ✅ A fifth check, **missing authentication entirely** (`missing_auth.py`)
+      — distinct from JWT `alg=none` forgery, this catches endpoints that
+      never check for a bearer token in the first place. Motivated by a
+      real finding while scanning crAPI, not a hypothetical.
 
 **Stretch**
-- [ ] Id *discovery* (not guessing) for BOLA/Mass Assignment, so they can
-      test UUID- or username-keyed resources, not just sequential integers
-      — confirmed necessary, not just theoretical (`EXTERNAL_VALIDATION.md`)
-- [ ] Mass Assignment on `POST` (resource creation), not just `PATCH`/`PUT`
-- [ ] Re-weight finding severity by reachability (e.g. no-auth-required),
-      not just detection-signal count
+- [ ] Write-based BOLA (`PATCH`/`PUT`/`DELETE` another user's object, not
+      just `GET`)
+- [ ] A config surface for target-specific Mass Assignment candidate fields
+- [ ] Re-weight finding severity by reachability, not just detection-signal
+      count
 - [ ] Simple web dashboard for scan results
 
 ## License

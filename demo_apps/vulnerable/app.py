@@ -3,6 +3,8 @@
 Every `# VULNERABLE:` comment marks a deliberate bug, one per scanner check:
   - POST /login .......... issues a JWT whose verification is disabled (accepts
                            alg=none forged tokens)            -> Broken Auth
+  - GET  /orders/{id}/receipt .. no auth check AT ALL, not even a garbage
+                           token required                     -> Missing Auth
   - GET  /users/{id} ..... returns password_hash in the body  -> Excessive Data Exposure
   - GET  /users/{id} ..... no ownership check (any user, any id) -> BOLA
   - GET  /orders/{id} .... no ownership check                 -> BOLA
@@ -144,6 +146,20 @@ def read_order(order_id: int, current: dict = Depends(get_current_user)) -> dict
         raise HTTPException(status_code=404, detail="order not found")
     # VULNERABLE (BOLA): any authenticated user can read any order.
     return order
+
+
+@app.get("/orders/{order_id}/receipt")
+def read_order_receipt(order_id: int) -> dict:
+    order = ORDERS.get(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="order not found")
+    # VULNERABLE (Missing Authentication): unlike every other endpoint here,
+    # this one never checks for a bearer token at all -- no
+    # Depends(get_current_user). Modeled directly on a real finding from
+    # scanning OWASP crAPI (see EXTERNAL_VALIDATION.md): a GET endpoint
+    # returning real order data with zero Authorization header required,
+    # not even a garbage/invalid one.
+    return {"order_id": order["id"], "item": order["item"], "amount": order["amount"]}
 
 
 @app.get("/public/items/{item_id}", openapi_extra={"security": []})

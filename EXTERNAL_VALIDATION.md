@@ -16,7 +16,7 @@ vulnerability list, not ours.
 | Target | What it is | Result summary |
 |---|---|---|
 | [VAmPI](#target-1-vampi) | Small Flask API, purpose-built to test scanners | 1 true positive, 2 scanner false positives found & fixed, 2 confirmed severe misses |
-| [crAPI](#target-2-crapi) | OWASP's larger, microservices-based vulnerable API | 9 true positives (incl. a system-wide auth bypass), 1 scanner false positive found & fixed |
+| [crAPI](#target-2-crapi) | OWASP's larger, microservices-based vulnerable API | 11 true positives (incl. a system-wide auth bypass and 2 endpoints requiring no auth at all), 1 scanner false positive found & fixed |
 
 Two other candidates were attempted and correctly ruled out rather than
 forced: **OWASP DevSlop's Pixi** (abandoned project, no OpenAPI spec) and
@@ -605,7 +605,55 @@ never have found this regardless of how many candidates it tried, because
 the id space isn't sequential integers at all. Confirmed as a real BOLA
 the same way as §2: user B's own token reads user A's post.
 
-#### 5. Out of scope, correctly not claimed
+#### 5. True positive, found by a brand-new check: no authentication required at all
+
+Found while investigating an unrelated `--auth-header` mistake during the
+Mass Assignment re-verification above (§4): `GET
+/workshop/api/shop/orders/{order_id}` returned real order and payment data
+with the `Authorization` header removed entirely — not a forged token, no
+credential at all. Manually confirmed with a bare `curl`, no headers.
+That's a strictly simpler, more severe bug than the `alg=none` forgery in
+§1 (it doesn't even require an attacker to have ever seen a valid token
+shape), and none of the four existing checks caught it as such: BOLA
+reported it as "user A and user B can both read this," which is true but
+undersells the actual problem — anyone, authenticated or not, can read it.
+
+Built a fifth check, `missing_auth.py` (`MissingAuthCheck`, API2:2023):
+resend the exact same request with the `Authorization` header stripped
+entirely, and flag anything that still succeeds. Reuses the same
+id-discovery-then-guess mechanism (`_candidate_ids_for()`, promoted to
+`checks/base.py` as a genuinely shared helper alongside `bola.py` and
+`mass_assignment.py`, closing a small pre-existing duplication in the
+process) to confirm a candidate id is real and accessible before testing
+it with no auth — a 404 on a wrong guessed id proves nothing about
+authentication either way.
+
+Live-verified on a fresh crAPI instance, and it found more than the one bug
+that motivated it:
+
+```
+CRITICAL  API2:2023 Broken Authentication - No Authentication Required -- GET /workshop/api/shop/orders/{order_id}
+    id=1: request with no Authorization header at all still got HTTP 200.
+CRITICAL  API2:2023 Broken Authentication - No Authentication Required -- GET /workshop/api/shop/return_qr_code
+    request with no Authorization header at all still got HTTP 200.
+```
+
+The second finding, `GET /workshop/api/shop/return_qr_code`, is genuinely
+new — it has no `{id}` path parameter at all, so BOLA would never even
+attempt it (BOLA only runs on id-addressable endpoints); this check found
+it purely because it doesn't need an id-shaped path to test "is auth
+required here at all."
+
+Also added the equivalent planted bug to the repo's own demo apps
+(`demo_apps/vulnerable/app.py`'s `GET /orders/{order_id}/receipt`, with a
+matching FIXED version in `demo_apps/secure/app.py`), so this check has a
+deterministic, CI-tested example alongside the live crAPI validation, same
+as every other check. It legitimately double-fires with BOLA there too (a
+CRITICAL Missing Authentication finding plus a HIGH BOLA finding on the
+same endpoint) — not a bug in either check, since an endpoint with zero
+auth is, by definition, also readable by two different identities.
+
+#### 6. Out of scope, correctly not claimed
 
 SSRF, NoSQL/SQL injection, layer-7 DoS/rate limiting, BFLA (deleting
 another user's video), and the three LLM/chatbot-prompt-injection
@@ -622,6 +670,7 @@ about any of them.
 | Opaque-id entropy false positive | 🔧 **Found & fixed in apisec** | Entropy fallback now excludes id-like field names |
 | Mass assignment id-not-found (#8, #9, #10) | 🔧 **Found & fixed in apisec** | Retry loop, then real id discovery — both added and confirmed working |
 | Mass assignment field mismatch (#8, #9, #10) | ✅ **Caught** (HIGH/CONFIRMED) | Candidate list broadened past privilege-only fields (§4); `status` reaches CONFIRMED/HIGH, live-verified directly against the PUT endpoint and via a full scan's POST-endpoint test — required fixing a real bug in `_classify_readback()` (top-level-only field lookup, missed crAPI's `{"order": {...}}` response envelope) found along the way |
+| No authentication required at all (order endpoint, plus a second endpoint not separately documented by crAPI) | ✅ **Caught** (CRITICAL, x2 endpoints) | New `missing_auth.py` check — found live, not hypothetical; also caught a second, non-id-addressable endpoint BOLA structurally can't reach |
 | BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Not separately exploited to confirm |
 | Broken auth via password reset (#3) | — Not tested | Different flow than `alg=none` forgery |
 | SSRF / SQLi / NoSQLi / rate limiting / BFLA / LLM (#6, #7, #11-18) | — Out of scope | Not implemented; different OWASP/AI-security categories |
@@ -718,6 +767,17 @@ about any of them.
   later-iterated sibling check gets to run — not a scanner bug, but a real
   consequence of testing side-effecting endpoints against a stateful,
   resource-limited target.
+- **The unrelated thing surfaced above turned into its own check, and it
+  found a bug none of the other four could have.** "No authentication
+  required at all" is a different, simpler, more severe bug than the
+  `alg=none` forgery `broken_auth.py` already tested for, and existing BOLA
+  coverage only partially described it (it needs an id-addressable
+  endpoint to test at all). Building `missing_auth.py` around that exact
+  gap found a SECOND real bug on the same target
+  (`GET /workshop/api/shop/return_qr_code`) that has no id parameter for
+  BOLA to even attempt — a concrete demonstration that a narrowly-scoped
+  check catches things a broader heuristic structurally cannot, not just a
+  different way of describing the same finding.
 
 ## Future work
 
@@ -790,7 +850,18 @@ about any of them.
   here) still won't be reachable without a way to supply custom candidates.
 - **Re-weight severity by reachability**, not just detection-signal count
   (VAmPI §4c) — an unauthenticated leak should plausibly outscore an
-  authenticated one with otherwise-identical evidence.
+  authenticated one with otherwise-identical evidence. Distinct from the
+  item below: this is about re-weighting existing findings, not detecting a
+  new class of bug.
+- ~~A fifth check: no authentication required at all~~ — **done.**
+  `missing_auth.py` (`MissingAuthCheck`, API2:2023) strips the
+  `Authorization` header entirely and flags anything that still succeeds —
+  distinct from `broken_auth.py`'s `alg=none` forgery, which assumes some
+  signature check exists to bypass in the first place. Found live on crAPI
+  (crAPI §5): the order-endpoint bug that motivated it, plus a second,
+  previously-uncaught bug (`GET /workshop/api/shop/return_qr_code`) that
+  BOLA structurally can't reach (no id parameter to test). Also added as a
+  planted, CI-tested bug in `demo_apps/vulnerable`/`demo_apps/secure`.
 - **OWASP DevSlop's Pixi** was ruled out for good reason (abandoned, no
   OpenAPI spec) and isn't a viable future target without the project being
   revived.

@@ -17,10 +17,18 @@ the real scanner and asserts the result (`tests/test_scan_all_targets.py`,
 
 | Target | Port | Planted bug(s) | Expected scan outcome |
 |---|---|---|---|
-| `demo_apps/vulnerable` | 8000 | one bug per check (see its own README) | 5 findings across all 3 OWASP ids |
-| `demo_apps/secure` | 8001 | none — the control group | **zero findings**, exit `0` |
+| `demo_apps/vulnerable` | 8000 | one bug per check (see its own README) | 7 findings across all 4 OWASP ids |
+| `demo_apps/secure` | 8001 | none — the control group | **1 LOW finding** (see note below), everything HIGH/CRITICAL is clean |
 | `demo_apps/bola_only` | 8002 | missing ownership check on `GET /orders/{id}` | **exactly 1 finding**: `API1:2023` |
 | `demo_apps/mass_assignment_only` | 8003 | `PATCH /me` applies undeclared fields | **exactly 1 finding**: `API3:2023` |
+
+`demo_apps/secure`'s one finding isn't a bug: Mass Assignment's SUSPECTED/LOW
+confidence tier (see `mass_assignment.py`'s module docstring) reports
+"accepted, couldn't confirm either way" whenever a write isn't rejected and
+the read-back response has nowhere a role/admin/permissions field could even
+appear — which is exactly `PATCH /me`'s situation on this genuinely secure
+target. See `tests/test_scan_all_targets.py`'s "secure" test param for the
+full explanation.
 
 Seed users on every target: `alice`/`alice-pw`, `bob`/`bob-pw`.
 
@@ -36,16 +44,18 @@ pytest tests/test_scan_all_targets.py -v -s
 
 ```
 tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[vulnerable]
-Demo Vulnerable API: 5 finding(s)
+Demo Vulnerable API: 7 finding(s)
   [CRITICAL] API2:2023 Broken Authentication - JWT alg=none bypass -- GET /me
   [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /users/{user_id}
   [HIGH    ] API3:2023 Excessive Data Exposure -- GET /users/{user_id}
   [HIGH    ] API3:2023 Mass Assignment -- PATCH /users/{user_id}
   [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /orders/{order_id}
+  [CRITICAL] API2:2023 Broken Authentication - No Authentication Required -- GET /orders/{order_id}/receipt
+  [HIGH    ] API1:2023 Broken Object Level Authorization (BOLA) -- GET /orders/{order_id}/receipt
 PASSED
 tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[secure]
-Demo Secure API: 0 finding(s)
-  (none)
+Demo Secure API: 1 finding(s)
+  [LOW     ] API3:2023 Mass Assignment -- PATCH /me
 PASSED
 tests/test_scan_all_targets.py::test_scan_reveals_expected_bugs[bola_only]
 Demo BOLA-Only API: 1 finding(s)

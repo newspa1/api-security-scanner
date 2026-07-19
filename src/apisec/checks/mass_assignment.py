@@ -187,14 +187,12 @@ from apisec.checks.base import (
     Severity,
     _extract_id_from_response,
     _item_endpoint_for_collection_path,
+    _candidate_ids_for,
     build_legit_payload,
     concrete_url,
-    discover_resource_id,
     find_item_endpoint_for_payload,
 )
 from apisec.spec_loader import Endpoint
-
-_CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
 
 # Privilege-escalation-flavored: does an undeclared field grant the writer
 # more ACCESS than they should have.
@@ -241,17 +239,6 @@ class _FieldResult(str, Enum):
     CONFIRMED = "confirmed"
     SUSPECTED = "suspected"
     CLEAR = "clear"
-
-
-def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
-    """A real, discovered id (if one can be found) tried first, then the
-    numeric guesses as a fallback -- mirrors bola.py's approach."""
-    discovered = discover_resource_id(endpoint, ctx)
-    if discovered is None:
-        return _CANDIDATE_IDS
-    if discovered in _CANDIDATE_IDS:
-        return _CANDIDATE_IDS
-    return [discovered, *_CANDIDATE_IDS]
 
 
 def _classify_readback(body: object, field_name: str, injected_value: object) -> _FieldResult:

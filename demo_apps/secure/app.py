@@ -1,8 +1,14 @@
 """A SECURE sibling of demo_apps/vulnerable -- no planted bugs at all. This is
-the control group: scanning this should produce ZERO findings, proving the
-scanner doesn't cry wolf on properly-defended code. Each `# FIXED (vs...)`
-comment marks the one line that closes the corresponding bug in the
-vulnerable demo.
+the control group, proving the scanner doesn't cry wolf on properly-defended
+code. Each `# FIXED (vs...)` comment marks the one line that closes the
+corresponding bug in the vulnerable demo.
+
+NOT literally zero findings, and that's intentional, not a bug here: Mass
+Assignment's SUSPECTED/LOW confidence tier (see mass_assignment.py's module
+docstring) fires on `PATCH /me` because its response genuinely has no
+role/admin/permissions field to prove OR disprove an injection against --
+see tests/test_scan_all_targets.py's "secure" test param for the full
+explanation. Every HIGH/CRITICAL-severity check still produces zero here.
 
 Run it with:  uvicorn demo_apps.secure.app:app --port 8001
 """
@@ -120,3 +126,15 @@ def read_order(order_id: int, current: dict = Depends(get_current_user)) -> dict
     if order["user_id"] != current["id"]:
         raise HTTPException(status_code=403, detail="not your order")
     return order
+
+
+@app.get("/orders/{order_id}/receipt")
+def read_order_receipt(order_id: int, current: dict = Depends(get_current_user)) -> dict:
+    order = ORDERS.get(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="order not found")
+    # FIXED (vs. Missing Authentication): requires a valid bearer token,
+    # same as every other endpoint here.
+    if order["user_id"] != current["id"]:
+        raise HTTPException(status_code=403, detail="not your order")
+    return {"order_id": order["id"], "item": order["item"], "amount": order["amount"]}
