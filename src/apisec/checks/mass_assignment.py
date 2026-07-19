@@ -135,24 +135,37 @@ documentation, that the handler reads an undeclared `status` field. Unlike
 `status`, so a successful injection there has a real shot at
 CONFIRMED/HIGH, not just SUSPECTED/LOW.
 
-Confirmed live, with an honest limit on how far that confirmation goes:
-re-scanning crAPI showed the new candidates correctly wired end to end --
-`status` (and the others) appear among the SUSPECTED fields on
-`POST /workshop/api/shop/orders` and `POST /community/api/v2/community/posts`
-exactly as designed. What did NOT get re-verified live this pass: the
-predicted CONFIRMED/HIGH outcome on `PUT /workshop/api/shop/orders/{id}`
-specifically -- on that re-scan, id discovery/retry never locked onto a
-writable order for the fresh test accounts used (unclear whether that's
-per-account order/product state or unrelated target flakiness -- a
-follow-up `docker restart` of crAPI's workshop service, an attempt to rule
-out a stale-key issue, broke the target's own login entirely, cutting
-further live investigation short). Unit tests
-(`test_business_logic_field_is_flagged_when_it_persists`,
-`test_declared_business_logic_field_is_not_treated_as_a_finding`) confirm
-the mechanism itself is correct against fake sessions, independent of that
-target's live state. Re-verifying the specific CONFIRMED/HIGH prediction on
-a stable crAPI instance is honest, open follow-up work, not claimed as done
-here.
+Confirmed live, first partially -- re-scanning crAPI showed the new
+candidates correctly wired end to end (`status` and the others appearing
+among the SUSPECTED fields on POST endpoints), but the predicted
+CONFIRMED/HIGH outcome on `PUT /workshop/api/shop/orders/{id}` specifically
+didn't materialize on that pass, and a follow-up `docker restart` meant to
+rule out target flakiness broke the environment further instead of
+answering the question -- left as open follow-up at the time.
+
+RE-VERIFIED, and the real cause turned out to be a fixable bug, not target
+flakiness: re-attempting against a clean crAPI instance, and manually
+confirming via curl that `status` genuinely persists arbitrary values
+server-side (not just the one candidate value that happens to match its
+default), showed the check still reporting SUSPECTED, never CONFIRMED, for
+a specific, findable reason -- `_classify_readback()` only ever inspected a
+response body's TOP-LEVEL keys, while `GET /workshop/api/shop/orders/{id}`
+wraps everything in `{"order": {...}, "payment": {...}}`. The field was
+right there the whole time, just one level deeper than the classifier ever
+looked -- the exact same shape `_extract_id_from_response()` already
+handles for id discovery, never applied to classification. FIXED:
+`_classify_readback()` now checks one level of nesting the same way (see
+its own docstring). Re-verified immediately after: `status` now reaches
+`HIGH -- undeclared field(s) accepted and persisted`, confirmed both by
+calling the check directly against a real order and via a full `apisec`
+scan run (which reaches it through `POST /workshop/api/shop/orders`'s own
+create-and-verify path). See EXTERNAL_VALIDATION.md's crAPI section #4 for
+the full account, including two unrelated things this re-check also turned
+up: an `--auth-header` invocation mistake that incidentally revealed
+`GET /workshop/api/shop/orders/1` needs no authentication at all, and a
+real environmental interaction where Mass Assignment's own POST-candidate
+testing can exhaust a shared test account's balance before a
+later-iterated sibling check gets to run.
 
 Like BOLA, this is deliberately conservative about what counts as CONFIRMED:
 a request that just gets rejected outright isn't treated as "not
@@ -246,10 +259,26 @@ def _classify_readback(body: object, field_name: str, injected_value: object) ->
     match is CONFIRMED, an explicit different value is CLEAR (the server is
     actively overriding/ignoring it -- real evidence, not silence), and the
     field simply not appearing at all is SUSPECTED (we can't tell whether it
-    was silently stored somewhere this response doesn't show)."""
-    if not isinstance(body, dict) or field_name not in body:
+    was silently stored somewhere this response doesn't show).
+
+    Checks one level of nesting, not just the top level -- mirrors
+    `_extract_id_from_response()`'s `{"order": {"status": ...}}` handling.
+    Added after a live crAPI re-scan showed `status` capped at SUSPECTED
+    forever even though it demonstrably persists: `GET .../orders/{id}`
+    wraps everything in `{"order": {...}, "payment": {...}}`, so a
+    top-level-only check could never see it (see EXTERNAL_VALIDATION.md)."""
+    if not isinstance(body, dict):
         return _FieldResult.SUSPECTED
-    return _FieldResult.CONFIRMED if body[field_name] == injected_value else _FieldResult.CLEAR
+    if field_name in body:
+        return _FieldResult.CONFIRMED if body[field_name] == injected_value else _FieldResult.CLEAR
+    for value in body.values():
+        if isinstance(value, dict) and field_name in value:
+            return (
+                _FieldResult.CONFIRMED
+                if value[field_name] == injected_value
+                else _FieldResult.CLEAR
+            )
+    return _FieldResult.SUSPECTED
 
 
 def _check_field_on_post(

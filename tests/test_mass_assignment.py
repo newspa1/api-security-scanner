@@ -188,6 +188,35 @@ def test_declared_business_logic_field_is_not_treated_as_a_finding():
     assert "status" in findings[0].evidence
 
 
+class _FakeNestedEnvelopeSession:
+    """Simulates an API that wraps the resource one level deep on GET/write
+    responses, e.g. crAPI's `GET /workshop/api/shop/orders/{id}` returning
+    `{"order": {...}, "payment": {...}}` instead of the fields at the top
+    level. Regression test for `_classify_readback()`'s one-level-deep
+    lookup (see mass_assignment.py's module docstring)."""
+
+    def __init__(self, initial_state):
+        self.state = dict(initial_state)
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        payload = json or {}
+        self.state.update(payload)
+        return _FakeResponse(200, {"order": dict(self.state), "payment": {}})
+
+    def get(self, url, timeout=5, **kwargs):
+        return _FakeResponse(200, {"order": dict(self.state), "payment": {}})
+
+
+def test_confirmed_when_field_only_appears_nested_one_level_down():
+    session = _FakeNestedEnvelopeSession({"id": 1, "name": "x"})
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    confirmed = [f for f in findings if f.severity == Severity.HIGH]
+    assert len(confirmed) == 1
+    assert "accepted and persisted" in confirmed[0].evidence
+    assert "role" in confirmed[0].evidence
+
+
 def test_get_method_is_skipped():
     ep = Endpoint(path="/things/{id}", method="GET", operation_id="get_thing")
     session = _FakeSession({"id": 1}, accept_fields=None)

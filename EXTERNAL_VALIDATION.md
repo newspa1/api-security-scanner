@@ -548,6 +548,53 @@ mechanism itself is correct in isolation — the open item is re-verifying
 the CONFIRMED/HIGH prediction against a stable crAPI instance, honestly
 left as follow-up rather than claimed as done.
 
+**Re-verified against a fresh crAPI instance — CONFIRMED/HIGH reached, plus
+a real bug in the readback logic found and fixed along the way.** Brought
+up a completely clean `docker compose --compatibility up -d` (no drifted
+state from earlier sessions) and manually confirmed `status` is genuinely
+exploitable first: injecting `status: "return pending"` on an order whose
+real default status was `"delivered"` changed it, and the server-side enum
+check (`"has to be 'delivered', 'return pending' or 'returned'"`) proved the
+field is read and validated despite never being in the declared schema.
+But the automated check still reported everything as SUSPECTED, never
+CONFIRMED — root cause: `_classify_readback()` only ever looked at the
+response body's *top level* for the field name, while
+`GET /workshop/api/shop/orders/{id}` wraps everything in
+`{"order": {...}, "payment": {...}}`. `status` genuinely persisted; the
+checker just never looked one level deep to see it — the exact same shape
+`_extract_id_from_response()` already handled for id discovery, just never
+applied to the classification side. **Fixed**: `_classify_readback()` now
+checks one level of nesting the same way, with a new regression test
+(`test_confirmed_when_field_only_appears_nested_one_level_down`, a fake
+session simulating the `{"order": {...}}` envelope). Re-verified live
+immediately after: calling `MassAssignmentCheck` directly against the real
+endpoint now returns
+`HIGH -- id=38: undeclared field(s) accepted and persisted: status` —
+the predicted outcome, actually observed this time.
+
+A full end-to-end `apisec` scan run took two more honest detours to get a
+clean read on, both worth recording rather than smoothing over. First, an
+`--auth-header` invocation mistake (passed `"Authorization: Bearer <token>"`
+instead of the flag's expected `"Bearer <token>"`) broke every authenticated
+write for that entire scan while `GET /workshop/api/shop/orders/1`
+kept returning 200 regardless — which incidentally surfaced a real,
+separate finding: **that endpoint requires no authentication at all** for
+at least the target's pre-seeded order, confirmed by repeating the request
+with no `Authorization` header whatsoever. Second, with the header fixed, a
+full scan run against a fresh $100-credit account showed `status` reaching
+CONFIRMED/HIGH on `POST /workshop/api/shop/orders` (Mass Assignment's POST
+algorithm, which creates one real order per candidate field) but *not* on
+`PUT /workshop/api/shop/orders/{order_id}` in that same run — traced to the
+POST test spending real order money on all 10 candidate fields ($100,
+exactly the starting balance) before the scanner's endpoint-iteration order
+even reaches the PUT check, leaving nothing for its own
+`discover_resource_id()` call to spend and no writable id to lock onto.
+Confirmed by checking the account's credit afterward: exactly `$0.0`. This
+is a genuine, non-obvious environmental interaction on stateful/financial
+targets — not a scanner bug, and not this fix's problem to solve — but
+worth documenting as its own thing: **testing order can matter when sibling
+checks share a resource-limited backend.**
+
 **Id discovery also found a SECOND BOLA, invisible to any amount of
 numeric guessing.** Re-scanning crAPI with discovery in place surfaced a
 new finding: `GET /community/api/v2/community/posts/{postId}`. Discovery
@@ -574,7 +621,7 @@ about any of them.
 | BOLA — community posts (non-numeric ids) | ✅ **Caught** (HIGH, after id discovery) | Id discovery found a real nanoid-style post id; numeric guessing never could have |
 | Opaque-id entropy false positive | 🔧 **Found & fixed in apisec** | Entropy fallback now excludes id-like field names |
 | Mass assignment id-not-found (#8, #9, #10) | 🔧 **Found & fixed in apisec** | Retry loop, then real id discovery — both added and confirmed working |
-| Mass assignment field mismatch (#8, #9, #10) | ⚠️ **Partially caught, mechanism unproven end-to-end** — `status` (evidence-based, from crAPI's own spec) added to the candidate list and confirmed firing as SUSPECTED/LOW on tested endpoints; the specific CONFIRMED/HIGH outcome on `PUT .../orders/{id}` wasn't re-verified live this pass (id discovery didn't lock onto a resource on the re-scan) | Candidate list broadened past privilege-only fields (§4); unit-tested correct; live confirmation of the CONFIRMED/HIGH prediction is open follow-up, not claimed as done |
+| Mass assignment field mismatch (#8, #9, #10) | ✅ **Caught** (HIGH/CONFIRMED) | Candidate list broadened past privilege-only fields (§4); `status` reaches CONFIRMED/HIGH, live-verified directly against the PUT endpoint and via a full scan's POST-endpoint test — required fixing a real bug in `_classify_readback()` (top-level-only field lookup, missed crAPI's `{"order": {...}}` response envelope) found along the way |
 | BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Not separately exploited to confirm |
 | Broken auth via password reset (#3) | — Not tested | Different flow than `alg=none` forgery |
 | SSRF / SQLi / NoSQLi / rate limiting / BFLA / LLM (#6, #7, #11-18) | — Out of scope | Not implemented; different OWASP/AI-security categories |
@@ -642,11 +689,35 @@ about any of them.
   a live re-scan proving the new fields fire correctly on endpoints that do
   get tested — but a third piece, the specific CONFIRMED/HIGH outcome this
   was designed to produce on `PUT .../orders/{order_id}`, didn't reproduce
-  on that re-scan (id discovery came up empty), and a follow-up attempt to
-  diagnose why (restarting crAPI's workshop container) broke the target's
-  login entirely instead of answering the question. Reported as an honest
-  partial result and an open follow-up, not rounded up to "done" just
-  because two out of three checks passed.
+  on that first re-scan (id discovery came up empty), and a follow-up
+  attempt to diagnose why (restarting crAPI's workshop container) broke the
+  target's login entirely instead of answering the question. Reported as an
+  honest partial result and an open follow-up at the time, not rounded up
+  to "done."
+- **The open follow-up above led to a real bug, not just an unlucky
+  environment.** Re-attempting it against a clean crAPI instance surfaced
+  the actual cause: `_classify_readback()` only checked a response's
+  top-level keys, so it could never see `status` inside crAPI's
+  `{"order": {...}}` envelope — capping the finding at SUSPECTED forever
+  regardless of real persistence, which was manually confirmed via direct
+  curl before touching any code. Fixed by giving classification the same
+  one-level-deep lookup id discovery already had; re-verified live that
+  `status` now reaches CONFIRMED/HIGH. The lesson: an "environment was
+  flaky" conclusion is worth re-examining once the environment stops being
+  flaky — this time the real cause turned out to be a fixable, general bug,
+  not target drift.
+- **Reproducing an issue cleanly can surface an unrelated one.** Getting a
+  correctly-formatted `--auth-header` value wrong broke every authenticated
+  write for an entire scan run, and in the process revealed that
+  `GET /workshop/api/shop/orders/1` needs no authentication at all — a
+  real, separate finding, confirmed by repeating the request with no
+  `Authorization` header. Also surfaced a genuine environmental interaction
+  worth naming on its own: Mass Assignment's own POST-candidate testing
+  spends real order money (crAPI's simulated currency) on a shared test
+  account, which can exhaust the same account's balance before a
+  later-iterated sibling check gets to run — not a scanner bug, but a real
+  consequence of testing side-effecting endpoints against a stateful,
+  resource-limited target.
 
 ## Future work
 
@@ -695,18 +766,24 @@ about any of them.
   GET) — still needed for VAmPI's *other* severe bug, the password-change
   account takeover (distinct from the registration bug above; unrelated to
   Mass Assignment).
-- ~~A broader Mass Assignment candidate-field list~~ — **done, partially
+- ~~A broader Mass Assignment candidate-field list~~ — **done, fully
   verified.** `_CANDIDATE_BUSINESS_LOGIC_FIELDS` (`mass_assignment.py`) adds
   `status`, `is_paid`, `price`, `discount_percent`, `balance` alongside the
   original privilege-flavored list — `status` specifically evidence-based,
   read straight from crAPI's own 400-response example rather than guessed.
-  Live-confirmed the new candidates are correctly wired end to end (appear
-  as SUSPECTED on tested crAPI endpoints); NOT yet live-confirmed reaching
-  CONFIRMED/HIGH on `PUT /workshop/api/shop/orders/{order_id}` specifically
-  — id discovery didn't lock onto a writable order on the re-scan attempted
-  (crAPI environment issue, not this feature). **Re-verifying that specific
-  CONFIRMED/HIGH outcome against a stable crAPI instance is the concrete
-  next step**, not a new feature.
+  Live-confirmed reaching CONFIRMED/HIGH on
+  `PUT /workshop/api/shop/orders/{order_id}` directly, and on
+  `POST /workshop/api/shop/orders` in a full scan run. Getting there
+  required finding and fixing a real bug: `_classify_readback()`'s
+  top-level-only field lookup couldn't see `status` inside crAPI's
+  `{"order": {...}}` response envelope, now fixed with a one-level-deep
+  check (§4).
+- ~~Fix `_classify_readback()`'s shallow field lookup~~ — **done.** Found
+  while re-verifying the item above: the classifier checked only a response
+  body's top-level keys, so any API that wraps its resource one level deep
+  on read (crAPI's `{"order": {...}, "payment": {...}}`) could never
+  progress past SUSPECTED, no matter how real the persistence was. Now
+  mirrors `_extract_id_from_response()`'s existing one-level-deep lookup.
 - **A config surface for target-specific candidate fields** — even with the
   broader built-in list above, any target with domain-specific sensitive
   field names (neither privilege- nor the specific financial names guessed
