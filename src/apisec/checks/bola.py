@@ -7,11 +7,11 @@ check silently skips (returns []) when `ctx.session_b` is not configured.
 
 ALGORITHM (heuristic — read the limitation below before trusting a finding):
 1. Only applies to GET endpoints with an id-like path parameter, e.g.
-   `/orders/{id}`. Write-based BOLA (PATCH/DELETE another user's object) is a
-   natural extension but out of MVP scope — it requires mutating and then
-   restoring state during a scan, which adds real complexity; flagged here as
-   a follow-up (would be CRITICAL severity, since a write is worse than a
-   read).
+   `/orders/{id}`. Read-only, deliberately: see `write_bola.py` for the
+   PATCH/PUT write-based extension (CRITICAL severity, since a write is
+   worse than a read) — a separate check, not folded into this one, same
+   pattern as excessive_data_exposure.py / mass_assignment.py sharing an
+   OWASP id via distinct titles.
 2. For a small set of candidate ids, request the endpoint AS USER A. The first
    candidate that returns 2xx is treated as "a real, A-accessible resource" —
    this sidesteps the classic false-negative of guessing an id that doesn't
@@ -44,8 +44,8 @@ closing a DIFFERENT flavor of it:
      unavoidable false positives: a human-maintained allowlist
      (`ctx.public_paths`, wired from `--public-paths`), not detection.
 
-FOLLOW-UP still not done: write-based BOLA (PATCH/DELETE another user's
-object).
+FOLLOW-UP, done: write-based BOLA (PATCH/PUT another user's object -- DELETE
+deliberately excluded, see write_bola.py's own SCOPE section for why).
 
 ID DISCOVERY (added after external validation, see below): before falling
 back to `_CANDIDATE_IDS` guessing, tries `discover_resource_id()`

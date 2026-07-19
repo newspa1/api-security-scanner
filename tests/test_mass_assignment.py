@@ -8,7 +8,13 @@ integration test proving it against the real demo API spec end-to-end.
 from __future__ import annotations
 
 from apisec.checks.base import ScanContext, Severity
-from apisec.checks.mass_assignment import MassAssignmentCheck
+from apisec.checks.mass_assignment import (
+    MassAssignmentCheck,
+    _find_entry_in_list,
+    _find_list_in_body,
+    _path_affinity,
+    _uniquify_legit_payload,
+)
 from apisec.spec_loader import Endpoint, extract_endpoints
 
 # build_legit_payload is now a shared helper in checks/base.py -- see
@@ -345,8 +351,10 @@ def test_post_flags_via_payload_key_readback_for_client_chosen_id():
     assert len(findings) == 1
     assert "admin" in findings[0].evidence
     # confirms it actually resolved the resource via the submitted username,
-    # not a server-generated id (there wasn't one)
-    assert any(url.endswith("/apisec-test") for url in session.get_urls)
+    # not a server-generated id (there wasn't one). The username is now
+    # unique per candidate field (`_uniquify_legit_payload()`), not a fixed
+    # "apisec-test" literal, so check for the per-field suffix shape instead.
+    assert any(url.endswith("/apisec-test-admin") for url in session.get_urls)
 
 
 def test_post_low_suspected_finding_when_no_reflection_and_no_readback_possible():
@@ -373,6 +381,225 @@ def test_post_no_finding_when_create_is_rejected():
 
     ctx = ScanContext(base_url="http://x", session_a=_RejectingSession())
     assert MassAssignmentCheck().run(_orders_collection_endpoint(), ctx) == []
+
+
+# ---- "search a list" readback fallback -----------------------------------------
+
+def test_uniquify_legit_payload_appends_suffix_to_strings_only():
+    payload = {"username": "apisec-test", "quantity": 1, "active": True}
+    result = _uniquify_legit_payload(payload, "admin")
+    assert result == {"username": "apisec-test-admin", "quantity": 1, "active": True}
+
+
+def test_uniquify_legit_payload_gives_different_candidates_different_values():
+    payload = {"username": "apisec-test"}
+    assert _uniquify_legit_payload(payload, "role") != _uniquify_legit_payload(payload, "admin")
+
+
+def test_path_affinity_counts_shared_leading_segments():
+    assert _path_affinity("/users/v1/_debug", "/users/v1/register") == 2
+    assert _path_affinity("/createdb", "/users/v1/register") == 0
+    assert _path_affinity("/users/v1", "/users/v1/register") == 2
+
+
+def test_find_list_in_body_top_level():
+    assert _find_list_in_body([{"a": 1}]) == [{"a": 1}]
+
+
+def test_find_list_in_body_nested_one_level():
+    assert _find_list_in_body({"users": [{"a": 1}]}) == [{"a": 1}]
+
+
+def test_find_list_in_body_returns_none_when_no_list_present():
+    assert _find_list_in_body({"message": "ok"}) is None
+    assert _find_list_in_body("not a dict or list") is None
+
+
+def test_find_entry_in_list_matches_by_id():
+    entries = [{"id": 1, "x": "a"}, {"id": 2, "x": "b"}]
+    assert _find_entry_in_list(entries, "2", {}) == {"id": 2, "x": "b"}
+
+
+def test_find_entry_in_list_matches_by_payload_key_when_no_id():
+    entries = [{"username": "alice"}, {"username": "bob"}]
+    assert _find_entry_in_list(entries, None, {"username": "bob"}) == {"username": "bob"}
+
+
+def test_find_entry_in_list_returns_none_when_no_match():
+    entries = [{"id": 1}, {"id": 2}]
+    assert _find_entry_in_list(entries, "99", {"username": "nobody"}) is None
+
+
+class _FakeListSearchSession:
+    """VAmPI's exact shape: item GET (/users/v1/{username}) never shows the
+    injected field for anyone, but a separate "list everything" endpoint
+    (/users/v1/_debug) returns {"users": [...]}, and each entry there DOES
+    include it."""
+
+    def __init__(self):
+        self.stored: dict[str, dict] = {}
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        payload = json or {}
+        self.stored[str(payload.get("username"))] = dict(payload)
+        return _FakeResponse(200, {"message": "created"})
+
+    def get(self, url, timeout=5, **kwargs):
+        if url.endswith("/_debug"):
+            return _FakeResponse(200, {"users": list(self.stored.values())})
+        key = url.rsplit("/", 1)[-1]
+        record = self.stored.get(key)
+        if record is None:
+            return _FakeResponse(404)
+        return _FakeResponse(200, {"username": record["username"]})  # never shows the injected field
+
+
+def test_post_flags_via_list_search_when_item_readback_lacks_the_field():
+    schema = {"type": "object", "properties": {"username": {"type": "string"}}}
+    session = _FakeListSearchSession()
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[
+            _register_endpoint(schema),
+            Endpoint(path="/users/v1/{username}", method="GET", operation_id="get_user"),
+            Endpoint(path="/users/v1/_debug", method="GET", operation_id="debug_list"),
+        ],
+    )
+    findings = MassAssignmentCheck().run(_register_endpoint(schema), ctx)
+    confirmed = [f for f in findings if f.severity == Severity.HIGH]
+    assert len(confirmed) == 1
+    assert "role" in confirmed[0].evidence
+
+
+class _FakeTwoListSession:
+    """Two list endpoints tie on path affinity with the create endpoint
+    (both under /users/v1): "/users/v1" is a clean listing with no `admin`
+    field at all, "/users/v1/_debug" has it. Regression test for a real bug
+    found live on VAmPI: matching an entry in the FIRST (ambiguous) list
+    must not stop the search before trying the second, more informative
+    one."""
+
+    def __init__(self):
+        self.stored: dict[str, dict] = {}
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        payload = json or {}
+        self.stored[str(payload.get("username"))] = dict(payload)
+        return _FakeResponse(200, {"message": "created"})
+
+    def get(self, url, timeout=5, **kwargs):
+        if url.endswith("/_debug"):
+            return _FakeResponse(200, {"users": list(self.stored.values())})
+        if url.endswith("/users/v1"):
+            return _FakeResponse(200, {"users": [{"username": k} for k in self.stored]})
+        key = url.rsplit("/", 1)[-1]
+        record = self.stored.get(key)
+        if record is None:
+            return _FakeResponse(404)
+        return _FakeResponse(200, {"username": record["username"]})
+
+
+def test_list_search_keeps_trying_after_a_suspected_match():
+    schema = {"type": "object", "properties": {"username": {"type": "string"}}}
+    session = _FakeTwoListSession()
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[
+            _register_endpoint(schema),
+            Endpoint(path="/users/v1/{username}", method="GET", operation_id="get_user"),
+            Endpoint(path="/users/v1", method="GET", operation_id="list_users"),
+            Endpoint(path="/users/v1/_debug", method="GET", operation_id="debug_list"),
+        ],
+    )
+    findings = MassAssignmentCheck().run(_register_endpoint(schema), ctx)
+    confirmed = [f for f in findings if f.severity == Severity.HIGH]
+    assert len(confirmed) == 1
+    assert "role" in confirmed[0].evidence
+
+
+class _FakeListSearchClearSession:
+    """Item GET explicitly shows a DIFFERENT value for every injected field
+    (CLEAR -- real evidence against). The list endpoint, if it were ever
+    reached, would say CONFIRMED instead -- proving list search must not
+    override real evidence it already has."""
+
+    def __init__(self):
+        self.stored: dict[str, dict] = {}
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        payload = json or {}
+        self.stored[str(payload.get("username"))] = dict(payload)
+        return _FakeResponse(200, {"message": "created"})
+
+    def get(self, url, timeout=5, **kwargs):
+        if url.endswith("/_debug"):
+            return _FakeResponse(200, {"users": list(self.stored.values())})
+        key = url.rsplit("/", 1)[-1]
+        record = self.stored.get(key, {})
+        overridden = {"username": record.get("username")}
+        for k in record:
+            if k != "username":
+                overridden[k] = "overridden-value"
+        return _FakeResponse(200, overridden)
+
+
+def test_post_list_search_does_not_override_a_clear_verdict():
+    schema = {"type": "object", "properties": {"username": {"type": "string"}}}
+    session = _FakeListSearchClearSession()
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[
+            _register_endpoint(schema),
+            Endpoint(path="/users/v1/{username}", method="GET", operation_id="get_user"),
+            Endpoint(path="/users/v1/_debug", method="GET", operation_id="debug_list"),
+        ],
+    )
+    findings = MassAssignmentCheck().run(_register_endpoint(schema), ctx)
+    # CLEAR fields are never reported at all -- if list search had wrongly
+    # overridden the item read-back's CLEAR verdict with the list's
+    # CONFIRMED-looking data, this would show a HIGH finding instead.
+    assert findings == []
+
+
+class _FakeWriteListSearchSession:
+    """PATCH/PUT variant: item GET (/things/{id}) never shows the injected
+    field, but a list endpoint (/things) does, one entry per resource."""
+
+    def __init__(self):
+        self.state_by_id: dict[str, dict] = {"1": {"id": 1, "name": "x"}}
+
+    def request(self, method, url, json=None, timeout=5, **kwargs):
+        cid = url.rsplit("/", 1)[-1]
+        if cid not in self.state_by_id:
+            return _FakeResponse(404)
+        self.state_by_id[cid].update(json or {})
+        return _FakeResponse(200, dict(self.state_by_id[cid]))
+
+    def get(self, url, timeout=5, **kwargs):
+        if url.rstrip("/").endswith("/things"):
+            return _FakeResponse(200, list(self.state_by_id.values()))
+        cid = url.rsplit("/", 1)[-1]
+        record = self.state_by_id.get(cid)
+        if record is None:
+            return _FakeResponse(404)
+        return _FakeResponse(200, {"id": record["id"], "name": record.get("name")})
+
+
+def test_write_flags_via_list_search_when_item_readback_lacks_the_field():
+    session = _FakeWriteListSearchSession()
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        all_endpoints=[_patch_endpoint(), Endpoint(path="/things", method="GET", operation_id="list_things")],
+    )
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    confirmed = [f for f in findings if f.severity == Severity.HIGH]
+    assert len(confirmed) == 1
+    assert "id=1" in confirmed[0].evidence
+    assert "role" in confirmed[0].evidence
 
 
 # ---- id-retry logic, using an id-aware fake session ---------------------------

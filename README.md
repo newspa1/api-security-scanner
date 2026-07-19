@@ -22,6 +22,7 @@ breaks."
 | Broken Authentication (JWT `alg=none` forgery) | API2:2023 |
 | Broken Authentication (no auth required at all) | API2:2023 |
 | Broken Object Level Authorization (BOLA) | API1:2023 |
+| Broken Object Level Authorization (BOLA) - Write Access | API1:2023 |
 | Excessive Data Exposure | API3:2023 |
 | Mass Assignment | API3:2023 |
 
@@ -164,7 +165,8 @@ src/apisec/
     base.py         # Check protocol, ScanContext, Finding, concrete_url() helper
     broken_auth.py   # API2 — JWT alg=none
     missing_auth.py   # API2 — no Authorization header required at all
-    bola.py           # API1 — two-identity cross-access diff
+    bola.py           # API1 — two-identity cross-access diff (read)
+    write_bola.py      # API1 — two-identity cross-access diff (PATCH/PUT)
     mass_assignment.py         # API3 (write facet) — undeclared-field injection
     excessive_data_exposure.py # API3 (read facet) — hybrid 3-layer detection
 ```
@@ -220,11 +222,23 @@ just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
       — distinct from JWT `alg=none` forgery, this catches endpoints that
       never check for a bearer token in the first place. Motivated by a
       real finding while scanning crAPI, not a hypothetical.
+- ✅ **"Search a list" read-back** for Mass Assignment — some APIs never
+      expose an injected field on any single-resource read-back, only on a
+      separate "list everything" endpoint; this fallback finds and checks
+      those too. Confirmed live on VAmPI: the registration bug (undeclared
+      `admin: true`) now reaches full CONFIRMED/HIGH, not just a
+      low-confidence lead.
+- ✅ A sixth check, **write-based BOLA** (`write_bola.py`) — `PATCH`/`PUT`
+      to another user's object, not just `GET`. `DELETE` is deliberately
+      excluded (see the check's own docstring for why). Found a real,
+      previously-uncounted bug on this repo's own demo target as a direct
+      result.
 
 **Stretch**
-- [ ] Write-based BOLA (`PATCH`/`PUT`/`DELETE` another user's object, not
-      just `GET`)
 - [ ] A config surface for target-specific Mass Assignment candidate fields
+- [ ] Recovering client-chosen identifiers for BOLA (read or write) — the
+      one documented case this doesn't reach yet is VAmPI's own account-
+      takeover bug, which is keyed by username, not a server-generated id
 - [ ] Re-weight finding severity by reachability, not just detection-signal
       count
 - [ ] Simple web dashboard for scan results

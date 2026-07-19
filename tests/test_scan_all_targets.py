@@ -35,16 +35,21 @@ from demo_apps.vulnerable.app import app as vulnerable_app
 # Missing Authentication finding AND a BOLA (literally anyone can read any
 # order's receipt, which is trivially "two identities can read the same
 # object") -- not a bug in either check, both are correctly describing the
-# same root cause from two different angles.
+# same root cause from two different angles. PATCH /users/{user_id} is a
+# SEPARATE double-hit, also real and not a bug: it was planted for Mass
+# Assignment (undeclared fields get applied) but was never given an
+# ownership check either, so write_bola.py newly and correctly reports it
+# too, once that check existed to look.
 TARGETS = [
     pytest.param(
         vulnerable_app,
         reset_vulnerable,
-        7,
+        8,
         {
             ("API2:2023", "Broken Authentication - JWT alg=none bypass"),
             ("API2:2023", "Broken Authentication - No Authentication Required"),
             ("API1:2023", "Broken Object Level Authorization (BOLA)"),
+            ("API1:2023", "Broken Object Level Authorization (BOLA) - Write Access"),
             ("API3:2023", "Excessive Data Exposure"),
             ("API3:2023", "Mass Assignment"),
         },

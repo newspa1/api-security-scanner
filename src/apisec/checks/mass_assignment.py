@@ -37,8 +37,66 @@ endpoint (`_item_endpoint_for_collection_path()`, the reverse of
 `find_item_endpoint_for_payload()` for a CLIENT-CHOSEN id (e.g. a username
 WE supplied at registration, never echoed back by the server): match a GET
 endpoint's path parameter name against a key in the payload we just sent,
-and use the value we supplied as the id. Classified the same way as
+and use the value we supplied as the id. If that read-back still can't see
+the field either way, one more fallback before giving up: "search a list"
+(`_search_lists_for_field()`, see below). Classified the same way as
 PATCH/PUT -- see CONFIDENCE TIERS below.
+
+"SEARCH A LIST" READBACK STRATEGY (closes the gap flagged as future work
+after VAmPI's registration bug stayed SUSPECTED even with a fully-working
+single-resource read-back -- see EXTERNAL_VALIDATION.md #4b): some APIs
+never expose a field on ANY id-addressable response, but DO expose it on a
+separate "list everything" endpoint. Confirmed exactly this way on VAmPI:
+`GET /users/v1/{username}` never returns `admin` for anyone, but
+`GET /users/v1/_debug` returns `{"users": [...]}`, and each entry in that
+list DOES include `admin`. `_search_lists_for_field()` tries every
+no-path-param GET endpoint in the spec (a real, if imperfect, signal for
+"this might return a list of everything" -- an id-addressable endpoint by
+definition has a path parameter, so it's excluded), searches each one's
+response for an array (top-level, or one level nested under a key, same
+convention as `_extract_id_from_response()`), and looks for the entry
+matching what was just created/written -- by server-generated id if we
+have one, otherwise by a client-chosen key/value pulled straight from the
+payload we just sent (e.g. `username`). Only reached when the direct
+read-back left the field ambiguous (SUSPECTED); it never overrides a
+CONFIRMED or CLEAR verdict the direct read-back already reached, since
+those are real evidence and a list search finding nothing shouldn't erase
+that. Used by both the POST and PATCH/PUT paths -- for PATCH/PUT, the
+locked-in candidate id (`run()`'s `used_id`) is passed through as the
+identifier to match on, the same as the POST path's discovered/client-
+chosen id.
+
+Getting this actually working end to end on VAmPI took three more fixes,
+each found by trying it live and getting a wrong (or unexplainedly absent)
+answer rather than trusting it worked on the first pass:
+  1. `_uniquify_legit_payload()`: every candidate field's create attempt was
+     reusing the exact same placeholder username (`build_legit_payload()`'s
+     fixed "apisec-test" string), so only the FIRST candidate ever actually
+     registered a new user on APIs with a uniqueness constraint -- every
+     later candidate silently read back the FIRST one's leftover data
+     instead of its own. Fixed by suffixing every string placeholder with
+     the field name being tested, so each candidate gets its own resource.
+  2. `_path_affinity()`: trying every no-path-param GET in plain spec
+     order meant "/createdb" (a GET with a real, destructive side effect --
+     it resets VAmPI's entire database) sorted before "/users/v1/_debug",
+     and go/no-go tried it first purely because it happened to come first
+     in the spec, wiping out the very test user this fallback needed
+     before ever reaching the endpoint that would have found it. Fixed by
+     preferring candidates that share a path prefix with the endpoint under
+     test.
+  3. Even with that ordering fix, "/users/v1" (a clean listing with no
+     `admin` field at all) TIES on path affinity with "/users/v1/_debug"
+     (which has it) -- both share the "/users/v1" prefix. Matching a real
+     entry in "/users/v1" first, then stopping because SOME entry was
+     found, meant the search never reached "/users/v1/_debug" at all. Fixed
+     by only stopping early on a CONFIRMED or CLEAR verdict, not a
+     SUSPECTED one -- an ambiguous match doesn't mean the search is done,
+     it means try the next candidate.
+Confirmed working after all three: `admin` on VAmPI's registration bug now
+reaches `HIGH -- undeclared field(s) accepted and persisted: admin`,
+verified via a full live re-scan. See EXTERNAL_VALIDATION.md #4b for the
+complete account, including how each of these was actually diagnosed (not
+guessed) by reproducing the wrong answer first and tracing why.
 
 CONFIDENCE TIERS (added after a live finding on VAmPI proved read-back alone
 isn't enough -- see EXTERNAL_VALIDATION.md #4b): trying to always PROVE
@@ -268,6 +326,150 @@ def _classify_readback(body: object, field_name: str, injected_value: object) ->
     return _FieldResult.SUSPECTED
 
 
+def _find_list_in_body(body: object) -> list | None:
+    """A response might BE the list (`[...]`), or wrap it one level deep
+    under some key (`{"users": [...]}`) -- same one-level-deep convention
+    used throughout this package (`_extract_id_from_response`,
+    `_classify_readback`)."""
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for value in body.values():
+            if isinstance(value, list):
+                return value
+    return None
+
+
+def _find_entry_in_list(entries: list, id_value: str | None, payload: dict) -> dict | None:
+    """Find the list entry for the resource just created/written: match a
+    server-generated id first (if we have one), then fall back to a
+    client-chosen key from the payload we just submitted (e.g. `username`)
+    -- the same two identifier flavors `find_item_endpoint_for_payload()`
+    and `_extract_id_from_response()` already handle elsewhere, just
+    applied to entries inside a list instead of a single response."""
+    if id_value is not None:
+        for entry in entries:
+            if isinstance(entry, dict) and _extract_id_from_response(entry) == id_value:
+                return entry
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for key, value in payload.items():
+            if isinstance(value, (str, int)) and not isinstance(value, bool) and entry.get(key) == value:
+                return entry
+    return None
+
+
+def _path_affinity(path_a: str, path_b: str) -> int:
+    """How many leading path segments two paths share -- used to prefer
+    list-endpoint candidates that plausibly belong to the SAME resource
+    family as the endpoint under test (e.g. "/users/v1/_debug" for
+    "/users/v1/register") over unrelated ones.
+
+    Confirmed necessary, not just a theoretical nicety: on VAmPI,
+    `_search_lists_for_field()` without this tried "/createdb" before
+    "/users/v1/_debug" (plain spec declaration order put it first) --
+    "/createdb" is a GET with a real, destructive side effect (it resets
+    VAmPI's entire database; a known quirk, also documented against
+    excessive_data_exposure.py's incidental GETs -- see
+    EXTERNAL_VALIDATION.md). Trying it wiped out the very test user this
+    fallback was trying to read back, before ever reaching the endpoint
+    that would have found it. Preferring same-resource-family candidates
+    first doesn't eliminate the risk in general (there's no OpenAPI
+    convention for "this GET is destructive"), but it makes hitting an
+    unrelated one far less likely."""
+    segs_a = path_a.strip("/").split("/")
+    segs_b = path_b.strip("/").split("/")
+    count = 0
+    for a, b in zip(segs_a, segs_b):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
+def _search_lists_for_field(
+    endpoint: Endpoint,
+    ctx: ScanContext,
+    payload: dict,
+    id_value: str | None,
+    field_name: str,
+    injected_value: object,
+) -> _FieldResult | None:
+    """Last-resort fallback for the SUSPECTED case, distinct from "read one
+    resource by id": some APIs never expose a field on any id-addressable
+    read-back, but DO expose it on a "list everything" endpoint -- e.g.
+    VAmPI's `GET /users/v1/_debug` returns `{"users": [...]}` including
+    `admin`, even though `GET /users/v1/{username}` never does for anyone
+    (see EXTERNAL_VALIDATION.md #4b). Tries every no-path-param GET
+    endpoint in the spec, closest-path-prefix-match first (`_path_affinity()`
+    -- see its docstring for why order matters here), searches each one's
+    response for the entry matching what was just created/written, and
+    classifies against THAT entry specifically -- not the whole list, which
+    would misattribute another user's field values.
+
+    Keeps trying further candidates even after finding a matching entry, as
+    long as the verdict from that entry is still SUSPECTED (matched, but
+    that particular list doesn't show the field either) -- confirmed
+    necessary on VAmPI, where "/users/v1" (a plain listing with no `admin`
+    field) ties on path affinity with "/users/v1/_debug" (which DOES have
+    it) and, without this, matching an entry there first would stop the
+    search before ever reaching the list that actually answers the
+    question. Only stops early on a CONFIRMED or CLEAR verdict -- real
+    evidence, not more silence.
+
+    Returns None (not SUSPECTED) when no list endpoint, or no matching
+    entry within one, was found at all, OR every match found was itself
+    only ever SUSPECTED -- lets the caller tell "list search genuinely
+    found nothing more definitive" apart from "checked a real entry, got a
+    real answer", so it never downgrades evidence it already has."""
+    candidates = [e for e in ctx.all_endpoints if e.method == "GET" and "{" not in e.path]
+    candidates.sort(key=lambda e: _path_affinity(e.path, endpoint.path), reverse=True)
+    for list_endpoint in candidates:
+        try:
+            resp = ctx.session_a.get(list_endpoint.url(ctx.base_url), timeout=5)
+        except requests.RequestException:
+            continue
+        if resp.status_code >= 400:
+            continue
+        try:
+            body = resp.json()
+        except ValueError:
+            continue
+        entries = _find_list_in_body(body)
+        if entries is None:
+            continue
+        entry = _find_entry_in_list(entries, id_value, payload)
+        if entry is None:
+            continue
+        result = _classify_readback(entry, field_name, injected_value)
+        if result != _FieldResult.SUSPECTED:
+            return result
+    return None
+
+
+def _uniquify_legit_payload(legit_payload: dict, suffix: str) -> dict:
+    """Give a copy of `legit_payload` unique STRING values by appending
+    `-{suffix}`, so calling `_check_field_on_post()` once per candidate
+    field -- which each create a real, separate resource -- doesn't collide
+    on APIs that enforce a uniqueness constraint (username, email, ...).
+
+    Confirmed necessary on VAmPI: every candidate reused the exact same
+    literal placeholder username ("apisec-test", from `build_legit_payload`'s
+    fixed string placeholder), so only the FIRST candidate ever actually
+    registered a NEW user -- every later one got rejected as a duplicate (or,
+    on VAmPI specifically, got HTTP 200 with a `{"status": "fail", ...}`
+    body, not even a 4xx to signal the collision), and then read back the
+    FIRST candidate's leftover data instead of its own. `admin` stayed stuck
+    at SUSPECTED/CLEAR instead of reaching CONFIRMED for exactly this
+    reason, not because the field genuinely couldn't be confirmed -- see
+    EXTERNAL_VALIDATION.md."""
+    return {
+        key: f"{value}-{suffix}" if isinstance(value, str) else value
+        for key, value in legit_payload.items()
+    }
+
+
 def _check_field_on_post(
     endpoint: Endpoint,
     ctx: ScanContext,
@@ -277,14 +479,19 @@ def _check_field_on_post(
 ) -> _FieldResult:
     """POST creates a NEW resource per attempt (unlike PATCH/PUT, which
     reuses one locked-in id), so each candidate field gets its own create +
-    verify round trip. Confirmation, in order: the create response itself
-    reflecting the field back (many APIs return the created object
-    directly); then a separate GET, located either via a server-generated
-    id in the create response matched to a sibling item endpoint, or via
-    find_item_endpoint_for_payload() for client-chosen ids. If no read-back
-    path exists at all, that's SUSPECTED, not CLEAR -- see CONFIDENCE TIERS
-    in the module docstring."""
-    payload = {**legit_payload, field_name: injected_value}
+    verify round trip -- with its own uniquified legit payload
+    (`_uniquify_legit_payload()`), so different candidates' resources don't
+    collide with each other on APIs that enforce unique fields. Confirmation,
+    in order: the create response itself reflecting the field back (many
+    APIs return the created object directly); then a separate GET, located
+    either via a server-generated id in the create response matched to a
+    sibling item endpoint, or via find_item_endpoint_for_payload() for
+    client-chosen ids; then, if that still leaves things ambiguous, a
+    "search a list" fallback (`_search_lists_for_field()`) for APIs that
+    only expose the field on a list-everything endpoint. If nothing narrows
+    it down at all, that's SUSPECTED, not CLEAR -- see CONFIDENCE TIERS in
+    the module docstring."""
+    payload = {**_uniquify_legit_payload(legit_payload, field_name), field_name: injected_value}
     try:
         resp = ctx.session_a.request("POST", endpoint.url(ctx.base_url), json=payload, timeout=5)
     except requests.RequestException:
@@ -299,6 +506,7 @@ def _check_field_on_post(
     if isinstance(body, dict) and field_name in body:
         return _classify_readback(body, field_name, injected_value)
 
+    discovered_id = None
     read_url = None
     if isinstance(body, dict):
         discovered_id = _extract_id_from_response(body)
@@ -310,22 +518,30 @@ def _check_field_on_post(
         item_endpoint, id_value = find_item_endpoint_for_payload(payload, ctx.all_endpoints)
         if item_endpoint is not None:
             read_url = concrete_url(item_endpoint.path, ctx.base_url, id_value)
-    if read_url is None:
-        # created successfully, but nothing about this API's shape gives us
-        # a way to read it back and check -- weak evidence, not none.
-        return _FieldResult.SUSPECTED
+            discovered_id = discovered_id or id_value
 
-    try:
-        read_resp = ctx.session_a.get(read_url, timeout=5)
-    except requests.RequestException:
-        return _FieldResult.SUSPECTED
-    if read_resp.status_code >= 400:
-        return _FieldResult.SUSPECTED
-    try:
-        read_body = read_resp.json()
-    except ValueError:
-        return _FieldResult.SUSPECTED
-    return _classify_readback(read_body, field_name, injected_value)
+    result = _FieldResult.SUSPECTED
+    if read_url is not None:
+        try:
+            read_resp = ctx.session_a.get(read_url, timeout=5)
+        except requests.RequestException:
+            read_resp = None
+        if read_resp is not None and read_resp.status_code < 400:
+            try:
+                read_body = read_resp.json()
+            except ValueError:
+                read_body = None
+            if read_body is not None:
+                result = _classify_readback(read_body, field_name, injected_value)
+
+    if result == _FieldResult.SUSPECTED:
+        list_result = _search_lists_for_field(
+            endpoint, ctx, payload, discovered_id, field_name, injected_value
+        )
+        if list_result is not None:
+            result = list_result
+
+    return result
 
 
 def _check_field_on_write(
@@ -335,10 +551,14 @@ def _check_field_on_write(
     field_name: str,
     injected_value: object,
     legit_payload: dict,
+    id_value: str | None = None,
 ) -> _FieldResult:
     """PATCH/PUT variant: `url` is the already-locked-in, confirmed-real
     resource (see `run()`) -- write the injected field, then GET the SAME
-    url back and classify what comes back."""
+    url back and classify what comes back. Falls back to
+    `_search_lists_for_field()` (same as the POST path) when the direct
+    read-back is ambiguous, using `id_value` (the locked-in candidate id)
+    to match the right entry in a list."""
     payload = {**legit_payload, field_name: injected_value}
     try:
         write_resp = ctx.session_a.request(endpoint.method, url, json=payload, timeout=5)
@@ -347,17 +567,25 @@ def _check_field_on_write(
     if write_resp.status_code >= 400:
         return _FieldResult.CLEAR  # rejected outright -- evidence against, not silence
 
+    result = _FieldResult.SUSPECTED
     try:
         read_resp = ctx.session_a.get(url, timeout=5)
     except requests.RequestException:
-        return _FieldResult.SUSPECTED
-    if read_resp.status_code >= 400:
-        return _FieldResult.SUSPECTED
-    try:
-        body = read_resp.json()
-    except ValueError:
-        return _FieldResult.SUSPECTED
-    return _classify_readback(body, field_name, injected_value)
+        read_resp = None
+    if read_resp is not None and read_resp.status_code < 400:
+        try:
+            body = read_resp.json()
+        except ValueError:
+            body = None
+        if body is not None:
+            result = _classify_readback(body, field_name, injected_value)
+
+    if result == _FieldResult.SUSPECTED:
+        list_result = _search_lists_for_field(endpoint, ctx, payload, id_value, field_name, injected_value)
+        if list_result is not None:
+            result = list_result
+
+    return result
 
 
 class MassAssignmentCheck:
@@ -462,7 +690,9 @@ class MassAssignmentCheck:
             return []  # no candidate id was ever a real, writable resource
 
         results = {
-            field_name: _check_field_on_write(endpoint, ctx, url, field_name, injected_value, legit_payload)
+            field_name: _check_field_on_write(
+                endpoint, ctx, url, field_name, injected_value, legit_payload, used_id
+            )
             for field_name, injected_value in candidates
         }
         return self._findings_from_results(endpoint, results, on_creation=False, used_id=used_id)

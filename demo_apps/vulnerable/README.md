@@ -42,9 +42,16 @@ Orders: order `1` belongs to user A, order `2` belongs to user B.
 | `GET /users/{id}` | no ownership check — any user can read any id | BOLA (API1) |
 | `GET /orders/{id}` | no ownership check | BOLA (API1) |
 | `PATCH /users/{id}` | applies undeclared body fields (e.g. `role`) not in the schema | Mass Assignment (API3) |
+| `PATCH /users/{id}` | ALSO no ownership check — any user can write to any id | BOLA - Write Access (API1) |
 
 `GET /me` is deliberately **clean** (no `password_hash`) so the Excessive Data
 Exposure check has exactly one true positive to find (`/users/{id}`).
+
+`PATCH /users/{id}` is a real, legitimate double-hit too, not two bugs
+double-counted: it was planted for Mass Assignment (undeclared fields get
+applied) but was never given an ownership check either — bob can write to
+alice's record just by knowing her id. `write_bola.py` correctly reports
+that as its own, separate finding.
 
 `GET /orders/{id}/receipt` is a real, legitimate double-hit, not two bugs
 double-counted: skipping auth entirely means literally anyone can read any

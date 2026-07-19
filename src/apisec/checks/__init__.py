@@ -4,11 +4,13 @@ from apisec.checks.broken_auth import BrokenAuthCheck
 from apisec.checks.excessive_data_exposure import ExcessiveDataExposureCheck
 from apisec.checks.mass_assignment import MassAssignmentCheck
 from apisec.checks.missing_auth import MissingAuthCheck
+from apisec.checks.write_bola import WriteBolaCheck
 
 ALL_CHECKS: list[Check] = [
     BrokenAuthCheck(),
     MissingAuthCheck(),
     BolaCheck(),
+    WriteBolaCheck(),
     ExcessiveDataExposureCheck(),
     MassAssignmentCheck(),
 ]

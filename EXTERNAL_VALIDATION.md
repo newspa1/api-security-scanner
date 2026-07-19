@@ -195,6 +195,39 @@ remember what it submitted, not read a response). This account-takeover
 bug still needs write-based BOLA specifically, and it's now the clearest
 concrete argument for building it.
 
+**Write-based BOLA (`write_bola.py`) built, live-verified, and it confirms
+exactly the id-guessing gap this section already predicted -- not a new
+problem, the SAME one, now seen from the write side too.** Manually
+re-confirmed the account takeover still works exactly as described above
+(registered two fresh identities, user B's `PUT
+/users/v1/{username}/password` against user A's username still returns
+`204 No Content`). Ran the new check against it: no finding. Root cause,
+confirmed directly rather than assumed: `_collection_path()` doesn't even
+match `/users/v1/{username}/password`'s shape (it ends in `/password`, not
+a bare `/{param}`), so `discover_resource_id()` never runs at all for this
+endpoint, and `_candidate_ids_for()` falls straight to guessing
+`["1".."5"]` -- confirmed via a direct call that this is exactly what
+happens, no discovered id among them. None of those are real usernames, so
+user A's own write never succeeds, and there's no writable candidate for
+the check to ever compare against user B. This is the honest result: the
+MECHANISM works (see the demo-app confirmation two paragraphs below), but
+THIS SPECIFIC bug needs client-chosen-id recovery for BOLA too --
+`mass_assignment.py`'s POST support already has this
+(`find_item_endpoint_for_payload()`), but that mechanism assumes a create
+step just happened with a payload to remember; write_bola.py is testing
+writes to an EXISTING resource, so the same trick doesn't directly
+transfer. Real, acknowledged follow-up work, not solved in this pass.
+
+Confirmed working on a real bug elsewhere, so this isn't just a null
+result: this repo's own `demo_apps/vulnerable` has a `PATCH
+/users/{user_id}` endpoint planted for Mass Assignment (undeclared fields
+get applied) that, as a genuine side effect nobody had separately counted,
+was never given an ownership check either. `write_bola.py` correctly
+reports that as a new, distinct CRITICAL finding — a real bug this scanner
+had been silently walking past on its OWN test fixture the whole time,
+found only once a check existed that specifically asked the write
+question instead of just the read one.
+
 **Re-checked again after adding Mass Assignment POST support — reaches the
 right resource now, but still can't see the bug, for a third, even more
 precise reason.** `mass_assignment.py` now tests POST/create endpoints
@@ -268,6 +301,64 @@ read-back match. The list-search readback strategy described above would
 upgrade this specific case from SUSPECTED to CONFIRMED, but is no longer
 required just to avoid staying silent about it.
 
+**Built the "search a list" strategy, and it took three real fixes on top
+of it before it actually worked -- each one found by trying it live and
+getting a wrong answer, not by guessing in advance.** `_search_lists_for_field()`
+(`mass_assignment.py`) tries every no-path-param GET endpoint in the spec
+for one that returns an array containing the resource just created, and
+classifies against that specific entry -- e.g. VAmPI's `GET
+/users/v1/_debug` returns `{"users": [...]}`, and each entry there DOES
+include `admin`, unlike `GET /users/v1/{username}`. Getting a correct
+CONFIRMED verdict out of this on VAmPI required:
+
+1. **Unique payloads per candidate.** Every candidate field's create
+   attempt reused the literal same placeholder username
+   (`build_legit_payload()`'s fixed `"apisec-test"`), so only the FIRST of
+   the ten candidate fields ever actually registered a new user; every
+   later one silently read back the FIRST one's leftover data instead of
+   its own, because VAmPI enforces unique usernames. Fixed with
+   `_uniquify_legit_payload()`, which suffixes every string placeholder
+   with the field name being tested.
+2. **Path-affinity ordering, not spec order.** Trying every no-path-param
+   GET in plain declaration order meant `GET /createdb` -- which resets
+   VAmPI's entire database as a side effect, see #4d below -- sorted
+   before `GET /users/v1/_debug` and got tried first, wiping the very test
+   user this fallback needed before ever reaching the endpoint that would
+   have found it. Fixed with `_path_affinity()`: prefer candidates that
+   share a path prefix with the endpoint under test.
+3. **Don't stop at the first ambiguous match.** Even with that ordering
+   fix, `GET /users/v1` (a clean listing with no `admin` field at all)
+   TIES on path affinity with `GET /users/v1/_debug` (which has it) --
+   both share the `/users/v1` prefix. Matching a real entry in
+   `/users/v1` first, then stopping because *some* entry was found, meant
+   the search never reached `/users/v1/_debug`. Fixed by only stopping
+   early on a CONFIRMED or CLEAR verdict, not a SUSPECTED one.
+
+Re-scanning VAmPI with a fresh identity after all three fixes:
+
+```
+HIGH  API3:2023 Mass Assignment -- POST /users/v1/register
+      undeclared field(s) accepted and persisted on creation: admin
+LOW   API3:2023 Mass Assignment -- POST /users/v1/register
+      undeclared field(s) accepted but not confirmed on creation: role, is_admin, isAdmin, permissions, is_paid, price, discount_percent, balance
+```
+
+`admin` now reaches full CONFIRMED/HIGH -- the outcome flagged as future
+work back when confidence tiers first shipped, now actually delivered and
+live-verified, not just theorized.
+
+One more thing worth naming honestly: reproducing this cleanly took
+several attempts against a VAmPI dev-server instance whose SQLite-backed
+state kept drifting between requests in ways that had nothing to do with
+this feature -- Flask's debug-mode reloader running two processes with
+inconsistent reads, and a `GET /createdb` call (issued by an EARLIER
+debugging attempt, before the path-affinity fix existed) resetting the
+database mid-investigation. Both were target-environment noise from this
+session's OWN repeated manual testing, not the scanner's behavior on a
+target it hadn't already been poked at -- worth being explicit about
+rather than letting "eventually it worked" read as "it worked cleanly the
+first time."
+
 #### 4c. A legitimate critique of the severity model
 
 One of the follow-up passes raised a good point about §1: an *unauthenticated*
@@ -310,8 +401,8 @@ implements. Not finding it is correct, not a miss.
 | Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (MEDIUM — arguably under-scored, §4c) | True positive, first try |
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
-| Unauthorized password change (account takeover) | ❌ **Still missed** — id discovery doesn't help here | Username is client-chosen; register response has no id to extract (§4b) |
-| Registration-time privilege escalation (`admin: true`) | ⚠️ **Partially caught** — reported as a LOW "accepted, not confirmed" finding, not a silent miss anymore | POST support + client-chosen-id readback locate the resource (§4b); `GET /users/v1/{username}` never returns `admin` for any user, so it can't be CONFIRMED/HIGH without a list-search readback strategy — but confidence tiers mean it's no longer invisible either (§4b) |
+| Unauthorized password change (account takeover) | ❌ **Still missed** — `write_bola.py` built and confirmed working elsewhere, but this specific endpoint needs client-chosen-id recovery too | Username is client-chosen; `_collection_path()` doesn't even match this path shape, so discovery never runs and guessing `["1".."5"]` never finds a real username (§4b) |
+| Registration-time privilege escalation (`admin: true`) | ✅ **Caught** (HIGH/CONFIRMED) | The "search a list" readback strategy (`_search_lists_for_field()`) finds the field on `GET /users/v1/_debug` even though no single-item read-back ever shows it — live-verified reaching full CONFIRMED, not just SUSPECTED/LOW (§4b) |
 | BOLA (`/users/v1/{username}` reads) | ❌ **Still missed** — same reason | Same client-chosen-identifier limitation |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
@@ -778,6 +869,29 @@ about any of them.
   BOLA to even attempt — a concrete demonstration that a narrowly-scoped
   check catches things a broader heuristic structurally cannot, not just a
   different way of describing the same finding.
+- **A feature that "should just work" from its design doc took three
+  additional, real fixes before it actually did — and each was found by
+  running it, not by reviewing the plan harder.** The "search a list"
+  readback strategy's own algorithm was correct on paper the whole time;
+  getting VAmPI's registration bug to CONFIRMED/HIGH needed three
+  unrelated bugs found and fixed along the way (duplicate-username
+  collisions between candidates, a destructive `GET /createdb` sorting
+  ahead of the useful list endpoint, and stopping the search too early at
+  an ambiguous match) — none of which were predictable from the design,
+  all of which were obvious once reproduced. Live-testing against a real
+  target caught all three; none would have shown up in a unit test written
+  against an idealized fake session that doesn't happen to have these
+  particular landmines.
+- **Building the mechanism and closing the specific motivating bug are two
+  different bars, and it's fine to hit only the first one.** Write-based
+  BOLA works, confirmed on a real bug this repo's own demo app had been
+  quietly carrying the whole time — but it does NOT close VAmPI's actual
+  password-change account takeover, the bug that motivated building it in
+  the first place, because that one specific endpoint needs a different,
+  not-yet-built capability (client-chosen-id recovery for BOLA). Reporting
+  "the check works, confirmed elsewhere" and "it doesn't close the
+  original motivating case, here's exactly why" side by side is more
+  useful than picking one framing over the other.
 
 ## Future work
 
@@ -811,21 +925,27 @@ about any of them.
   miss into a reported (if low-confidence) finding. Known, accepted cost:
   also fires on genuinely secure endpoints with minimal responses (the demo
   app's own secure target, confirmed via `tests/test_scan_all_targets.py`).
-- **A "search a list" readback strategy**, distinct from "read one resource
-  by id" — would upgrade VAmPI's registration bug from SUSPECTED/LOW to
-  CONFIRMED/HIGH: `admin: true` genuinely persists (confirmed via
-  `/_debug`), but no id-addressable endpoint ever returns an `admin` field
-  for any user, so a correctly-executed read-back has nothing to see. Would
-  need to recognize array-returning endpoints (`GET /users/v1/_debug`
-  returns `{"users": [...]}`) and search them for an entry matching what
-  was just created, a different lookup shape than everything built so far.
-  No longer required just to avoid a silent miss (confidence tiers above
-  already fixed that), so this is now a precision improvement, not a
-  detection gap.
-- **Write-based BOLA** (PATCH/DELETE/PUT another user's object, not just
-  GET) — still needed for VAmPI's *other* severe bug, the password-change
-  account takeover (distinct from the registration bug above; unrelated to
-  Mass Assignment).
+- ~~A "search a list" readback strategy~~ — **done.**
+  `_search_lists_for_field()` (`mass_assignment.py`) recognizes
+  array-returning endpoints (`GET /users/v1/_debug` returns
+  `{"users": [...]}`) and searches them for the entry matching what was
+  just created, when no single-resource read-back shows the field. Getting
+  a correct answer out of it took three more fixes (unique per-candidate
+  payloads, path-affinity ordering to avoid destructive GETs like
+  `/createdb`, and not stopping at the first ambiguous match) — see §4b.
+  Live-verified: VAmPI's registration bug now reaches CONFIRMED/HIGH, not
+  just SUSPECTED/LOW.
+- ~~Write-based BOLA~~ — **done.** `write_bola.py` (`WriteBolaCheck`)
+  tests PATCH/PUT to another user's object, same discover-then-guess
+  mechanism as bola.py's read version. `DELETE` deliberately excluded (no
+  generic way to test or undo it — see the check's own docstring).
+  Live-verified: caught a real, previously-uncounted bug on this repo's own
+  demo target (`PATCH /users/{user_id}` in `demo_apps/vulnerable`, planted
+  for Mass Assignment but never given an ownership check either). Does NOT
+  reach VAmPI's specific password-change account takeover, for the same
+  reason read-based BOLA doesn't (§4b): that endpoint is keyed by a
+  client-chosen username, which needs id recovery this check doesn't have
+  yet (below).
 - ~~A broader Mass Assignment candidate-field list~~ — **done, fully
   verified.** `_CANDIDATE_BUSINESS_LOGIC_FIELDS` (`mass_assignment.py`) adds
   `status`, `is_paid`, `price`, `discount_percent`, `balance` alongside the
@@ -862,6 +982,15 @@ about any of them.
   previously-uncaught bug (`GET /workshop/api/shop/return_qr_code`) that
   BOLA structurally can't reach (no id parameter to test). Also added as a
   planted, CI-tested bug in `demo_apps/vulnerable`/`demo_apps/secure`.
+- **Recovering client-chosen identifiers for BOLA (read or write)** — the
+  one concrete, named gap left after building write-based BOLA: VAmPI's
+  account-takeover bug is keyed by username, not a server-generated id, and
+  neither `bola.py` nor `write_bola.py` has a way to recover it the way
+  `mass_assignment.py`'s POST support does (`find_item_endpoint_for_payload()`)
+  — that mechanism assumes a create step with a payload to remember, which
+  doesn't apply when testing a write to an EXISTING resource. Would need a
+  different approach, e.g. remembering a real username from a prior
+  discovery/registration step within the same scan.
 - **OWASP DevSlop's Pixi** was ruled out for good reason (abandoned, no
   OpenAPI spec) and isn't a viable future target without the project being
   revived.
