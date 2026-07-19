@@ -7,7 +7,7 @@ integration test proving it against the real demo API spec end-to-end.
 
 from __future__ import annotations
 
-from apisec.checks.base import ScanContext
+from apisec.checks.base import ScanContext, Severity
 from apisec.checks.mass_assignment import MassAssignmentCheck
 from apisec.spec_loader import Endpoint, extract_endpoints
 
@@ -74,10 +74,21 @@ def test_no_finding_when_write_rejected():
     assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
 
 
-def test_no_finding_when_secure_handler_ignores_extra_fields():
+def test_secure_handler_produces_only_a_low_suspected_finding_not_a_high_one():
+    # the handler is secure (only "name" is ever applied), but the fake GET
+    # response never includes the injected field at all -- indistinguishable,
+    # from the outside, from a vulnerable handler that stores it somewhere
+    # this same read-back doesn't show. That ambiguity is now reported as a
+    # LOW "accepted, not confirmed" finding rather than staying silent (see
+    # CONFIDENCE TIERS in mass_assignment.py's module docstring) -- but it
+    # must NOT be reported as the HIGH-confidence "confirmed" finding.
     session = _FakeSession({"id": 1, "name": "x"}, accept_fields={"name"})  # secure
     ctx = ScanContext(base_url="http://x", session_a=session)
-    assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.LOW
+    assert "not confirmed" in findings[0].evidence
+    assert "role" in findings[0].evidence
 
 
 def test_declared_field_is_not_treated_as_a_finding():
@@ -93,6 +104,62 @@ def test_declared_field_is_not_treated_as_a_finding():
     assert "is_admin" in findings[0].evidence
 
 
+def test_explicit_different_value_on_readback_is_clear_not_suspected():
+    # the response DOES include "role", but with a value that contradicts
+    # what was injected -- real evidence the server is ignoring/overriding
+    # it, not silence. Must be excluded entirely (CLEAR), not reported as
+    # SUSPECTED just because it wasn't a verbatim match.
+    class _OverridesRoleSession:
+        def request(self, method, url, json=None, timeout=5, **kwargs):
+            return _FakeResponse(200, {"id": 1, "role": "user"})
+
+        def get(self, url, timeout=5, **kwargs):
+            return _FakeResponse(200, {"id": 1, "role": "user"})  # never changes
+
+    ctx = ScanContext(base_url="http://x", session_a=_OverridesRoleSession())
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1  # the other 4 candidate fields are still SUSPECTED
+    assert findings[0].severity == Severity.LOW
+    assert findings[0].evidence == (
+        "id=1: undeclared field(s) accepted but not confirmed: "
+        "is_admin, isAdmin, admin, permissions"
+    )
+
+
+def test_mixed_confirmed_and_suspected_fields_produce_two_separate_findings():
+    # "admin" genuinely persists and reads back; the rest of the candidate
+    # fields never show up in the response at all. Should produce one HIGH
+    # (confirmed) finding and one separate LOW (suspected) finding, not one
+    # finding lumping both confidence levels together.
+    class _OnlyAdminSticksSession:
+        def __init__(self):
+            self.stored_admin = None
+
+        def request(self, method, url, json=None, timeout=5, **kwargs):
+            payload = json or {}
+            if "admin" in payload:
+                self.stored_admin = payload["admin"]
+            return _FakeResponse(200, {"id": 1})
+
+        def get(self, url, timeout=5, **kwargs):
+            body = {"id": 1}
+            if self.stored_admin is not None:
+                body["admin"] = self.stored_admin
+            return _FakeResponse(200, body)
+
+    ctx = ScanContext(base_url="http://x", session_a=_OnlyAdminSticksSession())
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 2
+
+    high = next(f for f in findings if f.severity == Severity.HIGH)
+    low = next(f for f in findings if f.severity == Severity.LOW)
+    assert high.evidence == "id=1: undeclared field(s) accepted and persisted: admin"
+    assert low.evidence == (
+        "id=1: undeclared field(s) accepted but not confirmed: "
+        "role, is_admin, isAdmin, permissions"
+    )
+
+
 def test_get_method_is_skipped():
     ep = Endpoint(path="/things/{id}", method="GET", operation_id="get_thing")
     session = _FakeSession({"id": 1}, accept_fields=None)
@@ -100,11 +167,17 @@ def test_get_method_is_skipped():
     assert MassAssignmentCheck().run(ep, ctx) == []
 
 
-def test_post_no_finding_when_secure_create_handler_ignores_extra_fields():
+def test_post_secure_create_handler_produces_only_a_low_suspected_finding():
+    # same ambiguity as the PATCH/PUT case above, on a creation endpoint:
+    # the handler is secure, but there's no way to prove that from outside
+    # with this response shape -- LOW/suspected, not HIGH/confirmed, not [].
     ep = Endpoint(path="/things", method="POST", operation_id="create_thing")
     session = _FakeSession({}, accept_fields=set())  # secure: applies nothing extra
     ctx = ScanContext(base_url="http://x", session_a=session)
-    assert MassAssignmentCheck().run(ep, ctx) == []
+    findings = MassAssignmentCheck().run(ep, ctx)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.LOW
+    assert "not confirmed" in findings[0].evidence
 
 
 # ---- POST (creation) support ---------------------------------------------------
@@ -219,10 +292,10 @@ def test_post_flags_via_payload_key_readback_for_client_chosen_id():
     assert any(url.endswith("/apisec-test") for url in session.get_urls)
 
 
-def test_post_no_finding_when_no_reflection_and_no_readback_possible():
+def test_post_low_suspected_finding_when_no_reflection_and_no_readback_possible():
     # response has no id, and there's no sibling GET endpoint at all -- both
-    # readback strategies come up empty, so this is "no evidence", not a
-    # finding, even though the write itself wasn't rejected.
+    # readback strategies come up empty. The write itself wasn't rejected
+    # though, so this is weak evidence worth a LOW finding, not silence.
     class _NoInfoSession:
         def request(self, method, url, json=None, timeout=5, **kwargs):
             return _FakeResponse(200, {"message": "created"})
@@ -230,7 +303,10 @@ def test_post_no_finding_when_no_reflection_and_no_readback_possible():
     ctx = ScanContext(
         base_url="http://x", session_a=_NoInfoSession(), all_endpoints=[_orders_collection_endpoint()]
     )
-    assert MassAssignmentCheck().run(_orders_collection_endpoint(), ctx) == []
+    findings = MassAssignmentCheck().run(_orders_collection_endpoint(), ctx)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.LOW
+    assert "not confirmed" in findings[0].evidence
 
 
 def test_post_no_finding_when_create_is_rejected():
@@ -304,13 +380,18 @@ def test_no_finding_when_no_candidate_id_is_ever_writable():
     assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
 
 
-def test_no_finding_when_locked_in_id_has_secure_handler():
+def test_locked_in_id_with_secure_handler_produces_only_a_low_suspected_finding():
     # id "1" is real/writable, but the handler only applies the allowlisted
     # `name` field -- the retry loop correctly locks onto id 1 (no need to
-    # try further ids), and the secure handler correctly produces no finding.
+    # try further ids). Same read-back ambiguity as the tests above: LOW,
+    # not HIGH, not [].
     session = _FakeIdAwareSession(accessible_ids={"1"}, accept_fields={"name"})
     ctx = ScanContext(base_url="http://x", session_a=session)
-    assert MassAssignmentCheck().run(_patch_endpoint(), ctx) == []
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.LOW
+    assert "id=1" in findings[0].evidence
+    assert "not confirmed" in findings[0].evidence
 
 
 # ---- integration: against the real demo API spec + a live identity -----------

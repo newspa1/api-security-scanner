@@ -21,55 +21,77 @@ ALGORITHM, PATCH/PUT (an existing, id-addressable resource):
    was never confirmed to exist.
 3. Against that one locked-in id: for each candidate privileged field NOT
    in the declared schema (role, is_admin, permissions, ...), add it to the
-   legit payload and send the write.
-4. GET the same URL back and check whether the injected field's value
-   actually stuck. If it did, the handler is binding the raw request body
-   onto its model instead of an explicit allowlist of writable fields --
-   that's the finding. A field that's rejected, ignored, or the request
-   itself failing (4xx) is NOT evidence of anything.
+   legit payload, send the write, then GET the same URL back and classify
+   the result -- see CONFIDENCE TIERS below.
 
-ALGORITHM, POST (resource creation) -- see `_confirm_field_on_post()`:
+ALGORITHM, POST (resource creation) -- see `_check_field_on_post()`:
 Each candidate field gets its own fresh create + verify round trip (unlike
 PATCH/PUT, a POST makes a NEW resource every time, so there's no single id
-to lock onto and reuse). After creating with the injected field:
-1. Check if the create response itself reflects the field back -- many
-   APIs return the created object directly, no read-back needed.
-2. If not, try to read the resource back and check there instead: first via
-   a server-generated id extracted from the response
-   (`_extract_id_from_response()`) matched to a sibling item GET endpoint
-   (`_item_endpoint_for_collection_path()`, the reverse of
-   `discover_resource_id()`'s own direction); if that finds nothing, via
-   `find_item_endpoint_for_payload()` -- for a CLIENT-CHOSEN id (e.g. a
-   username WE supplied at registration, never echoed back by the server),
-   match a GET endpoint's path parameter name against a key in the payload
-   we just sent, and use the value we supplied as the id.
-3. If no way to read it back was found at all, that's "no evidence either
-   way", not a finding.
+to lock onto and reuse). After creating with the injected field, try to
+confirm it stuck: first via the create response itself reflecting the field
+back (many APIs return the created object directly, no read-back needed),
+then via a separate GET -- first via a server-generated id extracted from
+the response (`_extract_id_from_response()`) matched to a sibling item GET
+endpoint (`_item_endpoint_for_collection_path()`, the reverse of
+`discover_resource_id()`'s own direction), then, if that finds nothing, via
+`find_item_endpoint_for_payload()` for a CLIENT-CHOSEN id (e.g. a username
+WE supplied at registration, never echoed back by the server): match a GET
+endpoint's path parameter name against a key in the payload we just sent,
+and use the value we supplied as the id. Classified the same way as
+PATCH/PUT -- see CONFIDENCE TIERS below.
 
-FORMERLY SCOPED OUT, POST support added this pass (previously: "excludes
-POST. A PATCH/PUT target is id-addressable, so 'read back the same URL' is
-well-defined. A POST typically CREATES a resource at a different URL...
-finding it back requires parsing the response for an id... a real
+CONFIDENCE TIERS (added after a live finding on VAmPI proved read-back alone
+isn't enough -- see EXTERNAL_VALIDATION.md #4b): trying to always PROVE
+persistence via read-back runs into a real ceiling -- some APIs simply never
+expose the field being tested on any response we can reach (VAmPI's
+`GET /users/v1/{username}` never returns `admin` for anyone, vulnerable or
+not; only a separate list-everything endpoint does). Building a bespoke
+read-back mechanism for every possible response shape doesn't generalize;
+real DAST/API scanners (Burp, ZAP, commercial tools) mostly don't try to
+fully prove persistence either -- they flag "the server accepted an
+undeclared field without rejecting the request" as a weaker signal on its
+own, since a well-built API should reject unknown fields at the validation
+layer. This check now does the same thing, in three tiers per candidate
+field, decided by `_FieldResult`:
+  - CONFIRMED: a read-back (or the write's own response) shows the injected
+    value verbatim. Strong evidence -- reported as a HIGH severity finding.
+  - SUSPECTED: the write wasn't rejected (< 400), but nothing could prove
+    OR disprove it -- either there was no way to read the resource back at
+    all, or the read-back succeeded but that response shape just doesn't
+    include this field for anyone. Weak evidence -- reported as a separate
+    LOW severity finding, worded as "accepted, not confirmed" rather than
+    "vulnerable".
+  - CLEAR: the write was rejected outright, OR a read-back explicitly shows
+    a DIFFERENT value for the field (the server is actively ignoring or
+    overriding it) -- real evidence AGAINST the field being writable, not
+    silence. Not reported.
+Known trade-off, stated plainly: on a target with minimal POST responses and
+no reachable GET endpoint at all, EVERY accepted create will now produce a
+SUSPECTED/LOW finding, including on secure handlers that correctly discard
+the extra field -- there's no way to distinguish "discarded" from "silently
+stored somewhere we can't see" without a read-back path. That's the same
+trade-off real scanners make with this heuristic; LOW severity and
+"not confirmed" wording keep it from being reported as if it were proven,
+and LOW findings don't affect `cli.py`'s exit code (only high/critical do).
+
+FORMERLY SCOPED OUT, POST support added in an earlier pass (previously:
+"excludes POST. A PATCH/PUT target is id-addressable, so 'read back the same
+URL' is well-defined. A POST typically CREATES a resource at a different
+URL... finding it back requires parsing the response for an id... a real
 follow-up, not done here.") -- prompted by a confirmed, exploitable finding
 on VAmPI (github.com/erev0s/VAmPI, see EXTERNAL_VALIDATION.md #4b):
 `POST /users/v1/register` silently accepts an undeclared `admin: true`
-field, granting instant admin rights on account creation.
-
-STILL DOESN'T CATCH THAT SPECIFIC VAmPI BUG, for a precise and different
-reason than before: VAmPI's register payload has a `username` field, which
-DOES correctly match `find_item_endpoint_for_payload()` against
-`GET /users/v1/{username}`'s path parameter -- the create-to-read-back
-correlation works exactly as designed. But that item endpoint's own
-response schema only returns `{"username", "email"}` -- it never exposes
-`admin` at all, on ANY user, vulnerable or not. There's no place for the
-finding to surface even with the resource correctly located; the only
-VAmPI endpoint that DOES show `admin` (`GET /users/v1/_debug`) returns a
-list of all users, not one resource addressable by id, which is a
-different lookup shape (search-a-list, not read-by-id) not handled here.
-Re-verifying this specific case requires that additional list-search
-mechanism -- a further, separate piece of future work, distinct from
-"POST isn't handled" (which is now fixed) and distinct from "can't find a
-client-chosen id" (also now fixed).
+field, granting instant admin rights on account creation. Re-verified after
+adding CONFIRMED/SUSPECTED/CLEAR: on VAmPI this specific field now shows up
+as SUSPECTED rather than staying invisible -- `GET /users/v1/{username}`
+correctly locates the just-created user (id discovery + the client-chosen-id
+fallback both work), but that endpoint's response just doesn't include an
+`admin` key for anyone, so the injected field can't be read back and
+verbatim-confirmed. Before confidence tiers, that meant zero findings at
+all -- a silent miss. Now it surfaces as a LOW "accepted, not confirmed"
+finding, which is honest: the scanner genuinely doesn't know whether it
+persisted, but it also isn't staying quiet about a field that was accepted
+without complaint.
 
 FIXED after being found scanning OWASP crAPI (github.com/OWASP/crAPI, see
 EXTERNAL_VALIDATION.md target 2 #4): `concrete_url`'s default placeholder
@@ -78,7 +100,7 @@ crAPI's order/video endpoints, and unlike `bola.py` this check had NO RETRY
 across multiple candidate ids -- one placeholder, one attempt, done. Missed
 three of crAPI's documented mass-assignment bugs as a direct result. Now
 retries across `_CANDIDATE_IDS` with a legit-only baseline write per id
-(step 3 above), same shape as bola.py's approach.
+(step 2 above), same shape as bola.py's approach.
 
 STILL NOT ENOUGH with retries alone, confirmed by re-scanning crAPI after
 the retry fix above: the order this check needed to write to had id 7 --
@@ -99,18 +121,21 @@ logic mass assignment. crAPI's real bugs manipulate order quantity and
 refund amounts, not privilege fields -- confirmed crAPI's order response
 has no place for a `role` field to even appear, so a perfectly-discovered
 id still won't catch that specific bug with today's candidate list. This
-is now the sole remaining known gap for this check (id discovery closed
-the other one) -- a config surface for target-specific candidate fields,
-or business-logic-flavored defaults (quantity, amount, price, balance),
-would be the natural next step.
+is now the sole remaining known gap for this check -- a config surface for
+target-specific candidate fields, or business-logic-flavored defaults
+(quantity, amount, price, balance), would be the natural next step.
 
-Like BOLA, this is deliberately conservative: a request that just gets
-rejected outright isn't treated as "not vulnerable", it's treated as "no
-evidence either way" and skipped, so the check stays quiet rather than
-guessing.
+Like BOLA, this is deliberately conservative about what counts as CONFIRMED:
+a request that just gets rejected outright isn't treated as "not
+vulnerable", it's treated as "no evidence either way" and skipped entirely,
+so the HIGH tier stays quiet rather than guessing. The new SUSPECTED tier
+is the deliberate exception to that conservatism -- see CONFIDENCE TIERS
+above for why.
 """
 
 from __future__ import annotations
+
+from enum import Enum
 
 import requests
 
@@ -138,6 +163,14 @@ _CANDIDATE_PRIVILEGE_FIELDS: list[tuple[str, object]] = [
 ]
 
 
+class _FieldResult(str, Enum):
+    """See the CONFIDENCE TIERS section of the module docstring."""
+
+    CONFIRMED = "confirmed"
+    SUSPECTED = "suspected"
+    CLEAR = "clear"
+
+
 def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
     """A real, discovered id (if one can be found) tried first, then the
     numeric guesses as a fallback -- mirrors bola.py's approach."""
@@ -149,37 +182,47 @@ def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
     return [discovered, *_CANDIDATE_IDS]
 
 
-def _confirm_field_on_post(
+def _classify_readback(body: object, field_name: str, injected_value: object) -> _FieldResult:
+    """Shared verdict logic once we have a response body to check: verbatim
+    match is CONFIRMED, an explicit different value is CLEAR (the server is
+    actively overriding/ignoring it -- real evidence, not silence), and the
+    field simply not appearing at all is SUSPECTED (we can't tell whether it
+    was silently stored somewhere this response doesn't show)."""
+    if not isinstance(body, dict) or field_name not in body:
+        return _FieldResult.SUSPECTED
+    return _FieldResult.CONFIRMED if body[field_name] == injected_value else _FieldResult.CLEAR
+
+
+def _check_field_on_post(
     endpoint: Endpoint,
     ctx: ScanContext,
     field_name: str,
     injected_value: object,
     legit_payload: dict,
-) -> bool:
+) -> _FieldResult:
     """POST creates a NEW resource per attempt (unlike PATCH/PUT, which
     reuses one locked-in id), so each candidate field gets its own create +
-    verify round trip. Two ways to confirm the field stuck:
-    1. The create response itself reflects it back (many APIs return the
-       created object directly) -- no read-back needed.
-    2. A separate GET finds the resource: first via a server-generated id
-       in the create response matched to a sibling item endpoint (mirrors
-       discover_resource_id()'s direction, reversed), then, if that finds
-       nothing, via find_item_endpoint_for_payload() for client-chosen
-       ids (e.g. a username we supplied ourselves)."""
+    verify round trip. Confirmation, in order: the create response itself
+    reflecting the field back (many APIs return the created object
+    directly); then a separate GET, located either via a server-generated
+    id in the create response matched to a sibling item endpoint, or via
+    find_item_endpoint_for_payload() for client-chosen ids. If no read-back
+    path exists at all, that's SUSPECTED, not CLEAR -- see CONFIDENCE TIERS
+    in the module docstring."""
     payload = {**legit_payload, field_name: injected_value}
     try:
         resp = ctx.session_a.request("POST", endpoint.url(ctx.base_url), json=payload, timeout=5)
     except requests.RequestException:
-        return False
+        return _FieldResult.CLEAR
     if resp.status_code >= 400:
-        return False  # rejected outright -- not evidence either way
+        return _FieldResult.CLEAR  # rejected outright -- evidence against, not silence
     try:
         body = resp.json()
     except ValueError:
         body = None
 
-    if isinstance(body, dict) and body.get(field_name) == injected_value:
-        return True
+    if isinstance(body, dict) and field_name in body:
+        return _classify_readback(body, field_name, injected_value)
 
     read_url = None
     if isinstance(body, dict):
@@ -193,24 +236,116 @@ def _confirm_field_on_post(
         if item_endpoint is not None:
             read_url = concrete_url(item_endpoint.path, ctx.base_url, id_value)
     if read_url is None:
-        return False  # created it, but no way to read it back and check
+        # created successfully, but nothing about this API's shape gives us
+        # a way to read it back and check -- weak evidence, not none.
+        return _FieldResult.SUSPECTED
 
     try:
         read_resp = ctx.session_a.get(read_url, timeout=5)
     except requests.RequestException:
-        return False
+        return _FieldResult.SUSPECTED
     if read_resp.status_code >= 400:
-        return False
+        return _FieldResult.SUSPECTED
     try:
         read_body = read_resp.json()
     except ValueError:
-        return False
-    return isinstance(read_body, dict) and read_body.get(field_name) == injected_value
+        return _FieldResult.SUSPECTED
+    return _classify_readback(read_body, field_name, injected_value)
+
+
+def _check_field_on_write(
+    endpoint: Endpoint,
+    ctx: ScanContext,
+    url: str,
+    field_name: str,
+    injected_value: object,
+    legit_payload: dict,
+) -> _FieldResult:
+    """PATCH/PUT variant: `url` is the already-locked-in, confirmed-real
+    resource (see `run()`) -- write the injected field, then GET the SAME
+    url back and classify what comes back."""
+    payload = {**legit_payload, field_name: injected_value}
+    try:
+        write_resp = ctx.session_a.request(endpoint.method, url, json=payload, timeout=5)
+    except requests.RequestException:
+        return _FieldResult.CLEAR
+    if write_resp.status_code >= 400:
+        return _FieldResult.CLEAR  # rejected outright -- evidence against, not silence
+
+    try:
+        read_resp = ctx.session_a.get(url, timeout=5)
+    except requests.RequestException:
+        return _FieldResult.SUSPECTED
+    if read_resp.status_code >= 400:
+        return _FieldResult.SUSPECTED
+    try:
+        body = read_resp.json()
+    except ValueError:
+        return _FieldResult.SUSPECTED
+    return _classify_readback(body, field_name, injected_value)
 
 
 class MassAssignmentCheck:
     id = "API3:2023"
     title = "Mass Assignment"
+
+    def _findings_from_results(
+        self,
+        endpoint: Endpoint,
+        results: dict[str, _FieldResult],
+        on_creation: bool,
+        used_id: str | None = None,
+    ) -> list[Finding]:
+        confirmed = [f for f, r in results.items() if r == _FieldResult.CONFIRMED]
+        suspected = [f for f, r in results.items() if r == _FieldResult.SUSPECTED]
+        id_prefix = f"id={used_id}: " if used_id else ""
+        creation_suffix = " on creation" if on_creation else ""
+
+        findings: list[Finding] = []
+        if confirmed:
+            findings.append(
+                Finding(
+                    check_id=self.id,
+                    title=self.title,
+                    severity=Severity.HIGH,
+                    endpoint=endpoint.path,
+                    method=endpoint.method,
+                    description=(
+                        "The endpoint accepted and applied request body field(s) "
+                        "that aren't declared in its OpenAPI schema, suggesting it "
+                        "binds the raw request body onto its model instead of an "
+                        "explicit allowlist of writable fields."
+                    ),
+                    evidence=(
+                        f"{id_prefix}undeclared field(s) accepted and persisted"
+                        f"{creation_suffix}: {', '.join(confirmed)}"
+                    ),
+                )
+            )
+        if suspected:
+            findings.append(
+                Finding(
+                    check_id=self.id,
+                    title=self.title,
+                    severity=Severity.LOW,
+                    endpoint=endpoint.path,
+                    method=endpoint.method,
+                    description=(
+                        "The endpoint accepted request body field(s) that aren't "
+                        "declared in its OpenAPI schema without rejecting the "
+                        "request, but this scan couldn't confirm whether the "
+                        "field(s) actually took effect -- there was no reachable "
+                        "way to read the resource back, or the response never "
+                        "exposes this field for anyone. Worth a manual look: a "
+                        "well-built API should reject unknown fields outright."
+                    ),
+                    evidence=(
+                        f"{id_prefix}undeclared field(s) accepted but not confirmed"
+                        f"{creation_suffix}: {', '.join(suspected)}"
+                    ),
+                )
+            )
+        return findings
 
     def run(self, endpoint: Endpoint, ctx: ScanContext) -> list[Finding]:
         if endpoint.method not in {"PATCH", "PUT", "POST"}:
@@ -228,32 +363,11 @@ class MassAssignmentCheck:
         legit_payload = build_legit_payload(endpoint.request_body_schema)
 
         if endpoint.method == "POST":
-            confirmed = [
-                field_name
+            results = {
+                field_name: _check_field_on_post(endpoint, ctx, field_name, injected_value, legit_payload)
                 for field_name, injected_value in candidates
-                if _confirm_field_on_post(endpoint, ctx, field_name, injected_value, legit_payload)
-            ]
-            if not confirmed:
-                return []
-            return [
-                Finding(
-                    check_id=self.id,
-                    title=self.title,
-                    severity=Severity.HIGH,
-                    endpoint=endpoint.path,
-                    method=endpoint.method,
-                    description=(
-                        "The creation endpoint accepted and applied request body "
-                        "field(s) that aren't declared in its OpenAPI schema, "
-                        "suggesting it binds the raw request body onto its model "
-                        "instead of an explicit allowlist of writable fields."
-                    ),
-                    evidence=(
-                        "undeclared field(s) accepted and persisted on creation: "
-                        f"{', '.join(confirmed)}"
-                    ),
-                )
-            ]
+            }
+            return self._findings_from_results(endpoint, results, on_creation=True)
 
         url = None
         used_id = None
@@ -272,47 +386,8 @@ class MassAssignmentCheck:
         if url is None:
             return []  # no candidate id was ever a real, writable resource
 
-        confirmed: list[str] = []
-        for field_name, injected_value in candidates:
-            payload = {**legit_payload, field_name: injected_value}
-            try:
-                write_resp = ctx.session_a.request(endpoint.method, url, json=payload, timeout=5)
-            except requests.RequestException:
-                continue
-            if write_resp.status_code >= 400:
-                continue  # rejected outright -- not evidence either way
-
-            try:
-                read_resp = ctx.session_a.get(url, timeout=5)
-            except requests.RequestException:
-                continue
-            if read_resp.status_code >= 400:
-                continue
-            try:
-                body = read_resp.json()
-            except ValueError:
-                continue
-
-            if isinstance(body, dict) and body.get(field_name) == injected_value:
-                confirmed.append(field_name)
-
-        if not confirmed:
-            return []
-
-        return [
-            Finding(
-                check_id=self.id,
-                title=self.title,
-                severity=Severity.HIGH,
-                endpoint=endpoint.path,
-                method=endpoint.method,
-                description=(
-                    "The endpoint accepted and applied request body field(s) that "
-                    "aren't declared in its OpenAPI schema, suggesting it binds the "
-                    "raw request body onto its model instead of an explicit "
-                    "allowlist of writable fields."
-                ),
-                evidence=f"id={used_id}: undeclared field(s) accepted and persisted: "
-                f"{', '.join(confirmed)}",
-            )
-        ]
+        results = {
+            field_name: _check_field_on_write(endpoint, ctx, url, field_name, injected_value, legit_payload)
+            for field_name, injected_value in candidates
+        }
+        return self._findings_from_results(endpoint, results, on_creation=False, used_id=used_id)

@@ -234,6 +234,40 @@ tested — not fixed, and structurally different from (1) and (2): it's a
 response-shape gap, not a resource-discovery gap, and would need a
 list-search readback strategy as its own follow-up.
 
+**Re-checked a fourth time after adding confidence tiers — no longer a
+silent miss, even without the list-search mechanism.** Rather than building
+that list-search readback next, `mass_assignment.py` was changed to stop
+requiring proof of persistence before reporting anything at all (this is
+closer to how real DAST/API scanners like Burp and ZAP handle the same
+problem: flag "the server accepted an undeclared field without rejecting the
+request" as a weaker signal on its own, since a well-built API should reject
+unknown fields at validation). Every candidate field is now classified into
+one of three tiers — CONFIRMED (read-back proves it), SUSPECTED (accepted,
+not rejected, but nothing could prove or disprove it), CLEAR (rejected, or
+a read-back explicitly shows a *different* value — real evidence against,
+not silence). Re-scanning VAmPI with this change:
+
+```
+LOW  API3:2023 Mass Assignment -- POST /users/v1/register
+     undeclared field(s) accepted but not confirmed: role, is_admin, isAdmin, admin, permissions
+```
+
+The registration bug is no longer invisible — it now surfaces as a LOW,
+explicitly-worded "accepted, not confirmed" finding, which is an honest
+description of what the scanner actually knows: the field was accepted
+without complaint, and separately (per the manual `/_debug` check above) we
+happen to know it really did persist, but the scanner itself still can't
+prove that from any response it can reach. Trade-off, confirmed live: this
+tier also fired on `POST /users/v1/login` (a body field is accepted without
+rejection there too) and on the fully-secure demo app's `PATCH /me`
+(`tests/test_scan_all_targets.py`) — neither is a real Mass Assignment bug,
+they're just endpoints whose responses don't happen to echo the fields being
+probed. LOW severity and the "not confirmed" wording are the guardrail
+against over-claiming; a HIGH/CONFIRMED finding still requires an actual
+read-back match. The list-search readback strategy described above would
+upgrade this specific case from SUSPECTED to CONFIRMED, but is no longer
+required just to avoid staying silent about it.
+
 #### 4c. A legitimate critique of the severity model
 
 One of the follow-up passes raised a good point about §1: an *unauthenticated*
@@ -277,7 +311,7 @@ implements. Not finding it is correct, not a miss.
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
 | Unauthorized password change (account takeover) | ❌ **Still missed** — id discovery doesn't help here | Username is client-chosen; register response has no id to extract (§4b) |
-| Registration-time privilege escalation (`admin: true`) | ❌ **Still missed** — resource correctly located now, field just isn't exposed anywhere addressable | POST support + client-chosen-id readback both work (§4b); `GET /users/v1/{username}` never returns `admin` for any user — would need a list-search readback strategy (`/users/v1/_debug`), not built |
+| Registration-time privilege escalation (`admin: true`) | ⚠️ **Partially caught** — reported as a LOW "accepted, not confirmed" finding, not a silent miss anymore | POST support + client-chosen-id readback locate the resource (§4b); `GET /users/v1/{username}` never returns `admin` for any user, so it can't be CONFIRMED/HIGH without a list-search readback strategy — but confidence tiers mean it's no longer invisible either (§4b) |
 | BOLA (`/users/v1/{username}` reads) | ❌ **Still missed** — same reason | Same client-chosen-identifier limitation |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
@@ -447,18 +481,41 @@ different mechanism from "try more candidates": it doesn't need to guess
 how far a live database has drifted, because it just asks the API what a
 real id looks like.
 
-**One gap remains, confirmed even with the correct id in hand.** With a
+**One gap remained, confirmed even with the correct id in hand.** With a
 real, writable order id now found on every scan, Mass Assignment *still*
-reports nothing here — because crAPI's real mass-assignment bug
+reported nothing here — because crAPI's real mass-assignment bug
 manipulates *business/financial* fields (order quantity, refund amount),
 not the *privilege* fields (`role`, `is_admin`, `admin`, `permissions`)
 our candidate list targets. Confirmed directly: crAPI's order response has
 no place for a `role` field to even appear, so no candidate field we try
-could ever "stick." This is now the sole remaining known gap for this
-check — id discovery solved the "can't find a real resource" problem
-completely; a config surface for target-specific candidate fields (or
-business-logic-flavored defaults) is the natural next step, not attempted
-here.
+could ever "stick" — with the old binary confirm-or-nothing model, that
+meant zero findings, full stop.
+
+**Re-checked after adding Mass Assignment's confidence tiers (same fix
+described in the VAmPI writeup, §4b) — no longer silent, still not
+confirmed, for exactly the predicted reason.** Re-scanned crAPI with a
+fresh identity after that change:
+
+```
+LOW  API3:2023 Mass Assignment -- PUT /workshop/api/shop/orders/{order_id}
+     id=21: undeclared field(s) accepted but not confirmed: role, is_admin, isAdmin, admin, permissions
+```
+
+Same order-discovery mechanism as before (this time landing on id `21` —
+the database had drifted further still, unsurprising for a shared,
+long-lived Docker volume), same candidate fields, but now reported as a
+LOW "accepted, not confirmed" finding rather than nothing at all — the
+write wasn't rejected, but `role`/`admin`/etc. never appear in crAPI's
+order response either way, so it lands in SUSPECTED, not CONFIRMED. This
+is exactly the outcome the field-list mismatch predicts: the *fields*
+being tried are still the wrong flavor for this bug (privilege, not
+financial), so it can never become a HIGH/CONFIRMED finding without a
+business-logic-flavored candidate list — but it's no longer invisible
+either. The sole remaining known gap for this check is the same as
+before: a config surface for target-specific candidate fields, or
+business-logic-flavored defaults (`quantity`, `amount`, `price`,
+`balance`), which would let this specific bug become CONFIRMED/HIGH
+instead of merely SUSPECTED/LOW. Not attempted here.
 
 **Id discovery also found a SECOND BOLA, invisible to any amount of
 numeric guessing.** Re-scanning crAPI with discovery in place surfaced a
@@ -486,7 +543,7 @@ about any of them.
 | BOLA — community posts (non-numeric ids) | ✅ **Caught** (HIGH, after id discovery) | Id discovery found a real nanoid-style post id; numeric guessing never could have |
 | Opaque-id entropy false positive | 🔧 **Found & fixed in apisec** | Entropy fallback now excludes id-like field names |
 | Mass assignment id-not-found (#8, #9, #10) | 🔧 **Found & fixed in apisec** | Retry loop, then real id discovery — both added and confirmed working |
-| Mass assignment field mismatch (#8, #9, #10) | ❌ **Still missed** | Candidate fields are privilege-flavored; crAPI's bug is quantity/refund-flavored |
+| Mass assignment field mismatch (#8, #9, #10) | ⚠️ **Partially caught** — LOW "accepted, not confirmed" finding, not CONFIRMED/HIGH | Candidate fields are privilege-flavored; crAPI's bug is quantity/refund-flavored, so it can't be verbatim-confirmed — but confidence tiers (§4b of the VAmPI section) mean it's no longer silent either |
 | BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Not separately exploited to confirm |
 | Broken auth via password reset (#3) | — Not tested | Different flow than `alg=none` forgery |
 | SSRF / SQLi / NoSQLi / rate limiting / BFLA / LLM (#6, #7, #11-18) | — Out of scope | Not implemented; different OWASP/AI-security categories |
@@ -534,6 +591,20 @@ about any of them.
   the field really does persist server-side the whole time — every fix
   along the way was solving a real detection problem, not chasing a
   phantom.
+- **The fourth layer of that same bug didn't need a smarter reader — it
+  needed a different bar for "worth reporting."** Every earlier fix tried
+  to make Mass Assignment *prove* persistence via read-back; VAmPI's
+  registration bug kept surviving because some APIs simply never expose the
+  probed field on any response reachable that way. Real DAST/API scanners
+  mostly don't try to fully prove this either — they treat "the server
+  accepted an undeclared field without rejecting the request" as weak
+  evidence on its own. Adding that as an explicit LOW/SUSPECTED tier (next
+  to the existing HIGH/CONFIRMED one) turned a silent miss into an
+  honestly-worded low-confidence finding, at a known and accepted cost: it also
+  fires on genuinely secure endpoints whose responses are just minimal
+  (confirmed on the demo app's own secure target, `PATCH /me` — see
+  `tests/test_scan_all_targets.py`). That's a real trade-off, not a bug —
+  documented, not hidden.
 
 ## Future work
 
@@ -557,22 +628,36 @@ about any of them.
   `GET /users/v1/{username}` — the resource-discovery half of VAmPI's
   registration bug is fully solved; what remains is a different problem
   (below).
+- ~~Confidence tiers for Mass Assignment (CONFIRMED / SUSPECTED / CLEAR)~~ —
+  **done.** `_FieldResult` (`mass_assignment.py`) stops requiring proof of
+  persistence before reporting anything: a write that isn't rejected but
+  can't be verified either way now surfaces as a LOW "accepted, not
+  confirmed" finding instead of staying silent, matching how real DAST/API
+  scanners treat "accepted an undeclared field without rejecting it" as a
+  weaker signal on its own. Turned VAmPI's registration bug from a silent
+  miss into a reported (if low-confidence) finding. Known, accepted cost:
+  also fires on genuinely secure endpoints with minimal responses (the demo
+  app's own secure target, confirmed via `tests/test_scan_all_targets.py`).
 - **A "search a list" readback strategy**, distinct from "read one resource
-  by id" — the new, precise, remaining reason Mass Assignment still misses
-  VAmPI's registration bug: `admin: true` genuinely persists (confirmed via
+  by id" — would upgrade VAmPI's registration bug from SUSPECTED/LOW to
+  CONFIRMED/HIGH: `admin: true` genuinely persists (confirmed via
   `/_debug`), but no id-addressable endpoint ever returns an `admin` field
   for any user, so a correctly-executed read-back has nothing to see. Would
   need to recognize array-returning endpoints (`GET /users/v1/_debug`
   returns `{"users": [...]}`) and search them for an entry matching what
   was just created, a different lookup shape than everything built so far.
+  No longer required just to avoid a silent miss (confidence tiers above
+  already fixed that), so this is now a precision improvement, not a
+  detection gap.
 - **Write-based BOLA** (PATCH/DELETE/PUT another user's object, not just
   GET) — still needed for VAmPI's *other* severe bug, the password-change
   account takeover (distinct from the registration bug above; unrelated to
   Mass Assignment).
 - **A broader Mass Assignment candidate-field list**, or a config surface
   for target-specific fields — today's list is privilege-escalation-flavored
-  and confirmed to miss financial/business-logic mass assignment (crAPI
-  §4) even with the correct resource id in hand.
+  and confirmed to only reach LOW/SUSPECTED, never CONFIRMED/HIGH, on
+  financial/business-logic mass assignment (crAPI §4) even with the correct
+  resource id in hand, since the fields it tries are never the right ones.
 - **Re-weight severity by reachability**, not just detection-signal count
   (VAmPI §4c) — an unauthenticated leak should plausibly outscore an
   authenticated one with otherwise-identical evidence.

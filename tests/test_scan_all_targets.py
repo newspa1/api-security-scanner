@@ -43,7 +43,23 @@ TARGETS = [
         },
         id="vulnerable",
     ),
-    pytest.param(secure_app, reset_secure, 0, set(), id="secure"),
+    # NOT a real bug: `/me` genuinely never has role/admin/permissions
+    # fields (see demo_apps/secure/app.py's MeUpdate model and USERS dict --
+    # there's nothing to leak). But Mass Assignment's new SUSPECTED tier
+    # (mass_assignment.py's CONFIDENCE TIERS) reports "accepted, couldn't
+    # confirm either way" as LOW whenever a write isn't rejected AND the
+    # read-back response just doesn't include the field at all -- which is
+    # exactly this case. This is the documented trade-off of that tier: it
+    # can't tell "field doesn't exist in this API's data model" apart from
+    # "field exists but this response doesn't show it", so even a genuinely
+    # secure target gets one LOW/informational finding here.
+    pytest.param(
+        secure_app,
+        reset_secure,
+        1,
+        {("API3:2023", "Mass Assignment")},
+        id="secure",
+    ),
     pytest.param(
         bola_only_app,
         reset_bola_only,
