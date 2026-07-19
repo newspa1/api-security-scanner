@@ -118,11 +118,12 @@ def test_explicit_different_value_on_readback_is_clear_not_suspected():
 
     ctx = ScanContext(base_url="http://x", session_a=_OverridesRoleSession())
     findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
-    assert len(findings) == 1  # the other 4 candidate fields are still SUSPECTED
+    assert len(findings) == 1  # the other candidate fields are still SUSPECTED
     assert findings[0].severity == Severity.LOW
     assert findings[0].evidence == (
         "id=1: undeclared field(s) accepted but not confirmed: "
-        "is_admin, isAdmin, admin, permissions"
+        "is_admin, isAdmin, admin, permissions, status, is_paid, price, "
+        "discount_percent, balance"
     )
 
 
@@ -156,8 +157,35 @@ def test_mixed_confirmed_and_suspected_fields_produce_two_separate_findings():
     assert high.evidence == "id=1: undeclared field(s) accepted and persisted: admin"
     assert low.evidence == (
         "id=1: undeclared field(s) accepted but not confirmed: "
-        "role, is_admin, isAdmin, permissions"
+        "role, is_admin, isAdmin, permissions, status, is_paid, price, "
+        "discount_percent, balance"
     )
+
+
+def test_business_logic_field_is_flagged_when_it_persists():
+    # "status" is the business-logic-flavored candidate motivated by crAPI's
+    # real order-manipulation bug (see mass_assignment.py's module docstring
+    # and _CANDIDATE_BUSINESS_LOGIC_FIELDS) -- confirm it's actually wired
+    # into the check, not just declared and never used.
+    session = _FakeSession({"id": 1, "name": "x"}, accept_fields=None)  # vulnerable
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert "status" in findings[0].evidence
+    assert "is_paid" in findings[0].evidence
+
+
+def test_declared_business_logic_field_is_not_treated_as_a_finding():
+    # same guarantee as test_declared_field_is_not_treated_as_a_finding, for
+    # a business-logic candidate: a schema-declared "price" is legitimately
+    # writable and must not be reported, even on a vulnerable handler.
+    schema = {"type": "object", "properties": {"price": {"type": "number"}}}
+    session = _FakeSession({"id": 1}, accept_fields=None)
+    ctx = ScanContext(base_url="http://x", session_a=session)
+    findings = MassAssignmentCheck().run(_patch_endpoint(schema), ctx)
+    assert len(findings) == 1
+    assert "price" not in findings[0].evidence
+    assert "status" in findings[0].evidence
 
 
 def test_get_method_is_skipped():

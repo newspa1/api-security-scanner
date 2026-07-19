@@ -113,17 +113,46 @@ fallback when discovery doesn't work (no sibling POST, or the response has
 no recognizable id). Re-scanning crAPI again confirmed discovery reaching
 a real order (id 9, still past the guess range) reliably.
 
-ONE LIMITATION REMAINS, confirmed on that same crAPI re-scan (still zero
-Mass Assignment findings even with the right resource id in hand): the
-candidate FIELD list below is privilege-escalation-flavored
-(role/admin/permissions), which doesn't generalize to financial/business-
-logic mass assignment. crAPI's real bugs manipulate order quantity and
-refund amounts, not privilege fields -- confirmed crAPI's order response
-has no place for a `role` field to even appear, so a perfectly-discovered
-id still won't catch that specific bug with today's candidate list. This
-is now the sole remaining known gap for this check -- a config surface for
-target-specific candidate fields, or business-logic-flavored defaults
-(quantity, amount, price, balance), would be the natural next step.
+A GAP REMAINED for a while, confirmed on that same crAPI re-scan (zero Mass
+Assignment findings even with the right resource id in hand): the candidate
+field list was privilege-escalation-flavored only (role/admin/permissions),
+which doesn't generalize to financial/business-logic mass assignment.
+crAPI's real bugs manipulate order quantity and refund amounts, not
+privilege fields -- confirmed crAPI's order response has no place for a
+`role` field to even appear, so a perfectly-discovered id still couldn't
+catch that specific bug with the old candidate list.
+
+PARTIALLY ADDRESSED: `_CANDIDATE_BUSINESS_LOGIC_FIELDS` adds
+financial/workflow-flavored candidates (`status`, `is_paid`, `price`,
+`discount_percent`, `balance`) alongside the original privilege list.
+`status` isn't a guess: crAPI's own OpenAPI spec declares
+`PUT /workshop/api/shop/orders/{id}`'s writable body as ONLY
+`{product_id, quantity}`, but that same operation's own 400-response
+EXAMPLE reads "The value of 'status' has to be 'delivered', 'return
+pending' or 'returned'" -- proof, straight from the target's own
+documentation, that the handler reads an undeclared `status` field. Unlike
+`role` on that same endpoint, crAPI's `Order` response schema DOES expose
+`status`, so a successful injection there has a real shot at
+CONFIRMED/HIGH, not just SUSPECTED/LOW.
+
+Confirmed live, with an honest limit on how far that confirmation goes:
+re-scanning crAPI showed the new candidates correctly wired end to end --
+`status` (and the others) appear among the SUSPECTED fields on
+`POST /workshop/api/shop/orders` and `POST /community/api/v2/community/posts`
+exactly as designed. What did NOT get re-verified live this pass: the
+predicted CONFIRMED/HIGH outcome on `PUT /workshop/api/shop/orders/{id}`
+specifically -- on that re-scan, id discovery/retry never locked onto a
+writable order for the fresh test accounts used (unclear whether that's
+per-account order/product state or unrelated target flakiness -- a
+follow-up `docker restart` of crAPI's workshop service, an attempt to rule
+out a stale-key issue, broke the target's own login entirely, cutting
+further live investigation short). Unit tests
+(`test_business_logic_field_is_flagged_when_it_persists`,
+`test_declared_business_logic_field_is_not_treated_as_a_finding`) confirm
+the mechanism itself is correct against fake sessions, independent of that
+target's live state. Re-verifying the specific CONFIRMED/HIGH prediction on
+a stable crAPI instance is honest, open follow-up work, not claimed as done
+here.
 
 Like BOLA, this is deliberately conservative about what counts as CONFIRMED:
 a request that just gets rejected outright isn't treated as "not
@@ -154,12 +183,42 @@ from apisec.spec_loader import Endpoint
 
 _CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
 
+# Privilege-escalation-flavored: does an undeclared field grant the writer
+# more ACCESS than they should have.
 _CANDIDATE_PRIVILEGE_FIELDS: list[tuple[str, object]] = [
     ("role", "admin"),
     ("is_admin", True),
     ("isAdmin", True),
     ("admin", True),
     ("permissions", ["admin"]),
+]
+
+# Business-logic-flavored: does an undeclared field let the writer change
+# something with direct FINANCIAL/WORKFLOW consequences (free items, skipped
+# payment, inflated balances) rather than gaining admin access. Added after
+# this list's privilege-only focus was confirmed to miss all of crAPI's
+# documented mass-assignment bugs (order/refund manipulation, not role
+# fields) even with a correctly-discovered, real, writable resource in hand
+# -- see EXTERNAL_VALIDATION.md's crAPI section #4. `status` isn't a guess:
+# crAPI's own OpenAPI spec declares `PUT /workshop/api/shop/orders/{id}`'s
+# writable body as ONLY {product_id, quantity} (`ProductQuantity` schema),
+# but that same operation's own 400-response example reads "The value of
+# 'status' has to be 'delivered', 'return pending' or 'returned'" -- proof
+# the handler reads an undeclared `status` field, straight from the target's
+# own documentation, not speculation. Unlike VAmPI's `admin` field, crAPI's
+# `Order` response schema DOES expose `status`, so a successful injection
+# here has a real shot at CONFIRMED, not just SUSPECTED.
+_CANDIDATE_BUSINESS_LOGIC_FIELDS: list[tuple[str, object]] = [
+    ("status", "delivered"),
+    ("is_paid", True),
+    ("price", 0.01),
+    ("discount_percent", 100),
+    ("balance", 999999),
+]
+
+_CANDIDATE_FIELDS: list[tuple[str, object]] = [
+    *_CANDIDATE_PRIVILEGE_FIELDS,
+    *_CANDIDATE_BUSINESS_LOGIC_FIELDS,
 ]
 
 
@@ -354,7 +413,7 @@ class MassAssignmentCheck:
         declared_fields = set((endpoint.request_body_schema or {}).get("properties", {}))
         candidates = [
             (name, value)
-            for name, value in _CANDIDATE_PRIVILEGE_FIELDS
+            for name, value in _CANDIDATE_FIELDS
             if name not in declared_fields
         ]
         if not candidates:

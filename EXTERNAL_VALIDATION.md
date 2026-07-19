@@ -511,11 +511,42 @@ is exactly the outcome the field-list mismatch predicts: the *fields*
 being tried are still the wrong flavor for this bug (privilege, not
 financial), so it can never become a HIGH/CONFIRMED finding without a
 business-logic-flavored candidate list — but it's no longer invisible
-either. The sole remaining known gap for this check is the same as
-before: a config surface for target-specific candidate fields, or
-business-logic-flavored defaults (`quantity`, `amount`, `price`,
-`balance`), which would let this specific bug become CONFIRMED/HIGH
-instead of merely SUSPECTED/LOW. Not attempted here.
+either.
+
+**Added a business-logic-flavored candidate list — and this time `status`
+isn't a guess, it came straight from crAPI's own spec.** Re-reading
+`PUT /workshop/api/shop/orders/{order_id}`'s OpenAPI entry: its declared
+writable body is ONLY `{product_id, quantity}` (the `ProductQuantity`
+schema) — but that same operation's own 400-response *example* reads
+`"The value of 'status' has to be 'delivered', 'return pending' or
+'returned'"`. That's proof, from the target's own documentation, that the
+handler reads an undeclared `status` field — and unlike `role`, crAPI's
+`Order` response schema DOES expose `status`, so a successful injection
+here has a real shot at CONFIRMED/HIGH, not just SUSPECTED/LOW. Added
+`status`, `is_paid`, `price`, `discount_percent`, `balance` to the
+candidate list (`mass_assignment.py`'s `_CANDIDATE_BUSINESS_LOGIC_FIELDS`).
+
+**Live-verified the mechanism is correctly wired in; did NOT manage to
+re-verify the predicted CONFIRMED/HIGH outcome this pass — reporting both
+honestly rather than only the part that went cleanly.** Re-scanning crAPI
+with fresh accounts confirmed `status` and the other new candidates
+correctly appear among the SUSPECTED fields on the endpoints that DO get
+tested (`POST /workshop/api/shop/orders`, `POST /community/api/v2/community/posts`),
+proving the new list is live end-to-end, not just unit-tested. But on this
+particular re-scan, id discovery/retry never locked onto a writable order
+for `PUT /workshop/api/shop/orders/{order_id}` at all — no Mass Assignment
+finding fired there this time, so `status` was never actually tested
+against that specific endpoint on this run. Root cause unclear: possibly
+per-account order/product state for a freshly-registered identity, possibly
+unrelated target flakiness (a `docker restart` of crAPI's workshop service,
+attempted to rule out a stale-signing-key issue after several requests
+started failing with `"Invalid JWT Token!"`, ended up breaking the target's
+own login entirely and cut further live investigation short). Confirmed via
+unit tests (`test_business_logic_field_is_flagged_when_it_persists`,
+`test_declared_business_logic_field_is_not_treated_as_a_finding`) that the
+mechanism itself is correct in isolation — the open item is re-verifying
+the CONFIRMED/HIGH prediction against a stable crAPI instance, honestly
+left as follow-up rather than claimed as done.
 
 **Id discovery also found a SECOND BOLA, invisible to any amount of
 numeric guessing.** Re-scanning crAPI with discovery in place surfaced a
@@ -543,7 +574,7 @@ about any of them.
 | BOLA — community posts (non-numeric ids) | ✅ **Caught** (HIGH, after id discovery) | Id discovery found a real nanoid-style post id; numeric guessing never could have |
 | Opaque-id entropy false positive | 🔧 **Found & fixed in apisec** | Entropy fallback now excludes id-like field names |
 | Mass assignment id-not-found (#8, #9, #10) | 🔧 **Found & fixed in apisec** | Retry loop, then real id discovery — both added and confirmed working |
-| Mass assignment field mismatch (#8, #9, #10) | ⚠️ **Partially caught** — LOW "accepted, not confirmed" finding, not CONFIRMED/HIGH | Candidate fields are privilege-flavored; crAPI's bug is quantity/refund-flavored, so it can't be verbatim-confirmed — but confidence tiers (§4b of the VAmPI section) mean it's no longer silent either |
+| Mass assignment field mismatch (#8, #9, #10) | ⚠️ **Partially caught, mechanism unproven end-to-end** — `status` (evidence-based, from crAPI's own spec) added to the candidate list and confirmed firing as SUSPECTED/LOW on tested endpoints; the specific CONFIRMED/HIGH outcome on `PUT .../orders/{id}` wasn't re-verified live this pass (id discovery didn't lock onto a resource on the re-scan) | Candidate list broadened past privilege-only fields (§4); unit-tested correct; live confirmation of the CONFIRMED/HIGH prediction is open follow-up, not claimed as done |
 | BOLA — vehicle/mechanic reports (#2) | ❌ **Likely missed** | Not separately exploited to confirm |
 | Broken auth via password reset (#3) | — Not tested | Different flow than `alg=none` forgery |
 | SSRF / SQLi / NoSQLi / rate limiting / BFLA / LLM (#6, #7, #11-18) | — Out of scope | Not implemented; different OWASP/AI-security categories |
@@ -605,6 +636,17 @@ about any of them.
   (confirmed on the demo app's own secure target, `PATCH /me` — see
   `tests/test_scan_all_targets.py`). That's a real trade-off, not a bug —
   documented, not hidden.
+- **Not every live re-check goes cleanly, and that's worth reporting too.**
+  Broadening Mass Assignment's candidate list past privilege fields (crAPI
+  §4) verified cleanly in two ways — unit tests against fake sessions, and
+  a live re-scan proving the new fields fire correctly on endpoints that do
+  get tested — but a third piece, the specific CONFIRMED/HIGH outcome this
+  was designed to produce on `PUT .../orders/{order_id}`, didn't reproduce
+  on that re-scan (id discovery came up empty), and a follow-up attempt to
+  diagnose why (restarting crAPI's workshop container) broke the target's
+  login entirely instead of answering the question. Reported as an honest
+  partial result and an open follow-up, not rounded up to "done" just
+  because two out of three checks passed.
 
 ## Future work
 
@@ -653,11 +695,22 @@ about any of them.
   GET) — still needed for VAmPI's *other* severe bug, the password-change
   account takeover (distinct from the registration bug above; unrelated to
   Mass Assignment).
-- **A broader Mass Assignment candidate-field list**, or a config surface
-  for target-specific fields — today's list is privilege-escalation-flavored
-  and confirmed to only reach LOW/SUSPECTED, never CONFIRMED/HIGH, on
-  financial/business-logic mass assignment (crAPI §4) even with the correct
-  resource id in hand, since the fields it tries are never the right ones.
+- ~~A broader Mass Assignment candidate-field list~~ — **done, partially
+  verified.** `_CANDIDATE_BUSINESS_LOGIC_FIELDS` (`mass_assignment.py`) adds
+  `status`, `is_paid`, `price`, `discount_percent`, `balance` alongside the
+  original privilege-flavored list — `status` specifically evidence-based,
+  read straight from crAPI's own 400-response example rather than guessed.
+  Live-confirmed the new candidates are correctly wired end to end (appear
+  as SUSPECTED on tested crAPI endpoints); NOT yet live-confirmed reaching
+  CONFIRMED/HIGH on `PUT /workshop/api/shop/orders/{order_id}` specifically
+  — id discovery didn't lock onto a writable order on the re-scan attempted
+  (crAPI environment issue, not this feature). **Re-verifying that specific
+  CONFIRMED/HIGH outcome against a stable crAPI instance is the concrete
+  next step**, not a new feature.
+- **A config surface for target-specific candidate fields** — even with the
+  broader built-in list above, any target with domain-specific sensitive
+  field names (neither privilege- nor the specific financial names guessed
+  here) still won't be reachable without a way to supply custom candidates.
 - **Re-weight severity by reachability**, not just detection-signal count
   (VAmPI §4c) — an unauthenticated leak should plausibly outscore an
   authenticated one with otherwise-identical evidence.
