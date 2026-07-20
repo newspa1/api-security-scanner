@@ -233,12 +233,20 @@ just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
       excluded (see the check's own docstring for why). Found a real,
       previously-uncounted bug on this repo's own demo target as a direct
       result.
+- ✅ **Recovering the scanning identity's own client-chosen id** from its
+      JWT (`_identity_from_session()`) — most tokens carry the username as
+      a plaintext claim (`sub`, `username`, ...), which BOLA/write-BOLA can
+      use as a candidate id when numeric guessing and id discovery both
+      come up empty. Closed VAmPI's most severe documented bug: full
+      account takeover via unauthenticated password change, on both the
+      read and write side.
 
 **Stretch**
 - [ ] A config surface for target-specific Mass Assignment candidate fields
-- [ ] Recovering client-chosen identifiers for BOLA (read or write) — the
-      one documented case this doesn't reach yet is VAmPI's own account-
-      takeover bug, which is keyed by username, not a server-generated id
+- [ ] Recovering an ARBITRARY other user's client-chosen id for BOLA — the
+      fix above only recovers the scanning identity's OWN id (works for
+      "my own resource, someone else has a copy of it too" endpoints like
+      `/password`; doesn't help for an unrelated other user's resource)
 - [ ] Re-weight finding severity by reachability, not just detection-signal
       count
 - [ ] Simple web dashboard for scan results

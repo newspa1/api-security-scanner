@@ -15,7 +15,7 @@ vulnerability list, not ours.
 
 | Target | What it is | Result summary |
 |---|---|---|
-| [VAmPI](#target-1-vampi) | Small Flask API, purpose-built to test scanners | 1 true positive, 2 scanner false positives found & fixed, 2 confirmed severe misses |
+| [VAmPI](#target-1-vampi) | Small Flask API, purpose-built to test scanners | Multiple true positives incl. both of VAmPI's most severe documented bugs (account takeover, registration privilege escalation), 2 scanner false positives found & fixed |
 | [crAPI](#target-2-crapi) | OWASP's larger, microservices-based vulnerable API | 11 true positives (incl. a system-wide auth bypass and 2 endpoints requiring no auth at all), 1 scanner false positive found & fixed |
 
 Two other candidates were attempted and correctly ruled out rather than
@@ -228,6 +228,50 @@ had been silently walking past on its OWN test fixture the whole time,
 found only once a check existed that specifically asked the write
 question instead of just the read one.
 
+**Closed: recovering the scanning identity's own client-chosen id from its
+JWT.** The "real, acknowledged follow-up work" flagged two paragraphs
+above is now done. New `_identity_from_session()` (`checks/base.py`)
+decodes the scanning identity's OWN bearer JWT (unverified — same approach
+`broken_auth.py` already uses to forge `alg=none` tokens, since we're just
+reading claims out of our own already-trusted token) and pulls out a
+`sub`, `username`, or similar claim. Confirmed VAmPI's JWTs carry the
+username as `sub` by decoding a real token:
+`{'exp': 1784525418, 'iat': 1784525358, 'sub': 'jwtidA'}`. `_candidate_ids_for()`
+now offers this as a candidate id, right after a discovered id and before
+numeric guessing — it's not a guess, the scanning identity definitely has
+this exact id, since it's the account that logged in and got the token.
+
+Re-scanned the account-takeover bug directly after this fix, with two
+freshly-registered identities:
+
+```
+CRITICAL -- id=jwtidA: user A's write got HTTP 204, user B's write to the
+            SAME id (different identity) also got HTTP 204.
+```
+
+`write_bola.py` now correctly reports VAmPI's real, most severe documented
+bug — full account takeover via password change — closing the loop this
+whole section has been chasing since it was first found. The same fix is
+a genuine side benefit for `bola.py`'s read-only check too: separately
+confirmed it now finds the read-side BOLA on `GET /users/v1/{username}`
+for the identical reason, using the same recovered username.
+
+**Getting a clean end-to-end confirmation surfaced one more honest
+wrinkle, already-known and unrelated to this fix.** A full, single-pass
+`apisec` scan (all checks against all endpoints) does NOT reliably
+reproduce this finding, even with the fix in place — `GET /createdb`
+happens to be the very first endpoint in VAmPI's spec, and every check's
+normal probing of it (particularly `missing_auth.py`'s auth-stripped GET)
+triggers its real, destructive side effect (resets the entire database,
+first documented in target 1 #4d) before the password endpoint's turn,
+much later in the endpoint list, ever comes up — wiping out both
+freshly-registered test identities in the process. Confirmed this is the
+actual cause, not a flaw in the new identity-recovery code: calling the
+check directly, in isolation, against a still-populated database finds
+the bug reliably and repeatably; only a full scan against THIS SPECIFIC
+target, in one pass, loses the state it needs partway through. Reported
+honestly rather than claimed as a clean full-scan win it isn't.
+
 **Re-checked again after adding Mass Assignment POST support — reaches the
 right resource now, but still can't see the bug, for a third, even more
 precise reason.** `mass_assignment.py` now tests POST/create endpoints
@@ -401,9 +445,9 @@ implements. Not finding it is correct, not a miss.
 | Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (MEDIUM — arguably under-scored, §4c) | True positive, first try |
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
-| Unauthorized password change (account takeover) | ❌ **Still missed** — `write_bola.py` built and confirmed working elsewhere, but this specific endpoint needs client-chosen-id recovery too | Username is client-chosen; `_collection_path()` doesn't even match this path shape, so discovery never runs and guessing `["1".."5"]` never finds a real username (§4b) |
+| Unauthorized password change (account takeover) | ✅ **Caught** (CRITICAL) | `write_bola.py` + `_identity_from_session()` (decodes the scanning identity's own JWT for its username) — live-verified reaching the real bug, not just a mechanism proof (§4b). Full single-pass scans against VAmPI specifically don't reliably reproduce this due to `GET /createdb`'s side effect (§4d), a separate, already-documented target quirk |
 | Registration-time privilege escalation (`admin: true`) | ✅ **Caught** (HIGH/CONFIRMED) | The "search a list" readback strategy (`_search_lists_for_field()`) finds the field on `GET /users/v1/_debug` even though no single-item read-back ever shows it — live-verified reaching full CONFIRMED, not just SUSPECTED/LOW (§4b) |
-| BOLA (`/users/v1/{username}` reads) | ❌ **Still missed** — same reason | Same client-chosen-identifier limitation |
+| BOLA (`/users/v1/{username}` reads) | ✅ **Caught** (HIGH) | Same `_identity_from_session()` fix as the write-based bug above — live-verified separately |
 | SQLi / enumeration / RegexDOS / rate limiting | — Out of scope | Not implemented; different OWASP categories |
 | JWT weak-signing-key bypass | — Out of scope | Different attack from `alg=none` forgery |
 
@@ -883,15 +927,28 @@ about any of them.
   against an idealized fake session that doesn't happen to have these
   particular landmines.
 - **Building the mechanism and closing the specific motivating bug are two
-  different bars, and it's fine to hit only the first one.** Write-based
-  BOLA works, confirmed on a real bug this repo's own demo app had been
-  quietly carrying the whole time — but it does NOT close VAmPI's actual
-  password-change account takeover, the bug that motivated building it in
-  the first place, because that one specific endpoint needs a different,
-  not-yet-built capability (client-chosen-id recovery for BOLA). Reporting
-  "the check works, confirmed elsewhere" and "it doesn't close the
-  original motivating case, here's exactly why" side by side is more
-  useful than picking one framing over the other.
+  different bars, and hitting only the first one is a fine place to stop
+  reporting from — until the next session picks the second one back up.**
+  Write-based BOLA shipped confirmed on a real bug this repo's own demo
+  app had been quietly carrying the whole time, but at the time did NOT
+  close VAmPI's actual password-change account takeover, the bug that
+  motivated building it in the first place — that specific endpoint needed
+  a capability (client-chosen-id recovery) that didn't exist yet.
+  Reporting "the check works, confirmed elsewhere" and "it doesn't close
+  the original motivating case, here's exactly why" side by side, rather
+  than picking one framing, is what made it obvious what to build next —
+  and simple, once framed that way: read the id out of the token we
+  already have, instead of trying to guess or discover it from scratch.
+- **The fix, once found, was smaller than the search for it.**
+  `_identity_from_session()` is about twenty lines: decode the scanning
+  identity's own JWT (unverified, already-established pattern from
+  `broken_auth.py`), check a short list of common claim names, return the
+  first match. It closed VAmPI's most severe documented bug (full account
+  takeover) on both the read and write side, using infrastructure
+  (`_candidate_ids_for()`) that was already shared across four checks. The
+  hard part was recognizing that the token the scanner ALREADY holds is
+  itself a source of real, trustworthy identifiers — not building new
+  machinery to go find one.
 
 ## Future work
 
@@ -982,14 +1039,23 @@ about any of them.
   previously-uncaught bug (`GET /workshop/api/shop/return_qr_code`) that
   BOLA structurally can't reach (no id parameter to test). Also added as a
   planted, CI-tested bug in `demo_apps/vulnerable`/`demo_apps/secure`.
-- **Recovering client-chosen identifiers for BOLA (read or write)** — the
-  one concrete, named gap left after building write-based BOLA: VAmPI's
-  account-takeover bug is keyed by username, not a server-generated id, and
-  neither `bola.py` nor `write_bola.py` has a way to recover it the way
-  `mass_assignment.py`'s POST support does (`find_item_endpoint_for_payload()`)
-  — that mechanism assumes a create step with a payload to remember, which
-  doesn't apply when testing a write to an EXISTING resource. Would need a
-  different approach, e.g. remembering a real username from a prior
+- ~~Recovering client-chosen identifiers for BOLA (read or write)~~ —
+  **done, for the "my own resource" shape.** `_identity_from_session()`
+  (`checks/base.py`) decodes the scanning identity's own JWT (unverified,
+  same approach `broken_auth.py` already uses) and offers its `sub`/
+  `username`/etc. claim as a candidate id. Not a guess — the scanning
+  identity definitely has this exact id. Live-verified closing VAmPI's
+  actual account-takeover bug (`write_bola.py`) and its read-side twin
+  (`bola.py`). **Narrower than the general problem**, stated honestly:
+  this only recovers the SCANNING IDENTITY'S OWN id, which helps exactly
+  when the vulnerable resource is "my own account, but someone else has a
+  copy of it too" (self-service endpoints: `/password`, `/profile`, ...).
+  It does NOT help for an arbitrary OTHER user's resource with no
+  relationship to the scanning identity's own claims (e.g. someone else's
+  order, keyed by an id the scanning identity never had reason to know) —
+  that broader case is still open, and would need something closer to
+  `mass_assignment.py`'s POST-support approach
+  (`find_item_endpoint_for_payload()`), remembering a real id from a prior
   discovery/registration step within the same scan.
 - **OWASP DevSlop's Pixi** was ruled out for good reason (abandoned, no
   OpenAPI spec) and isn't a viable future target without the project being

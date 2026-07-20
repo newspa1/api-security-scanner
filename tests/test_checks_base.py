@@ -11,10 +11,14 @@ id -> matching item GET) and find_item_endpoint_for_payload (client-chosen id
 
 from __future__ import annotations
 
+import jwt
+
 from apisec.checks.base import (
     ScanContext,
+    _candidate_ids_for,
     _collection_path,
     _extract_id_from_response,
+    _identity_from_session,
     _item_endpoint_for_collection_path,
     build_legit_payload,
     discover_resource_id,
@@ -225,3 +229,91 @@ def test_find_item_endpoint_for_payload_ignores_boolean_values():
     endpoint, value = find_item_endpoint_for_payload(payload, [ep])
     assert endpoint is None
     assert value is None
+
+
+# ---- _identity_from_session: pulling a real id out of the scan's own JWT ------
+
+class _SessionWithHeaders:
+    def __init__(self, headers):
+        self.headers = headers
+
+
+def _bearer(claims):
+    return {"Authorization": f"Bearer {jwt.encode(claims, 'whatever-secret', algorithm='HS256')}"}
+
+
+def test_identity_from_session_extracts_sub_claim():
+    session = _SessionWithHeaders(_bearer({"sub": "alice"}))
+    assert _identity_from_session(session) == "alice"
+
+
+def test_identity_from_session_prefers_username_over_sub():
+    # _IDENTITY_CLAIM_KEYS checks "username" before "sub" -- a token with
+    # both should use the more specific, human-readable one.
+    session = _SessionWithHeaders(_bearer({"sub": "1", "username": "alice"}))
+    assert _identity_from_session(session) == "alice"
+
+
+def test_identity_from_session_handles_numeric_claim():
+    session = _SessionWithHeaders(_bearer({"user_id": 42}))
+    assert _identity_from_session(session) == "42"
+
+
+def test_identity_from_session_returns_none_when_no_authorization_header():
+    assert _identity_from_session(_SessionWithHeaders({})) is None
+
+
+def test_identity_from_session_returns_none_for_non_bearer_scheme():
+    session = _SessionWithHeaders({"Authorization": "Basic dXNlcjpwYXNz"})
+    assert _identity_from_session(session) is None
+
+
+def test_identity_from_session_returns_none_for_non_jwt_token():
+    # an opaque session id / API key, not shaped like a JWT at all
+    session = _SessionWithHeaders({"Authorization": "Bearer not-a-real-jwt"})
+    assert _identity_from_session(session) is None
+
+
+def test_identity_from_session_returns_none_when_no_matching_claim_present():
+    session = _SessionWithHeaders(_bearer({"exp": 9999999999, "iat": 1}))
+    assert _identity_from_session(session) is None
+
+
+def test_identity_from_session_ignores_boolean_claim_values():
+    # bool is an int subclass -- a claim like "id": true must not be
+    # mistaken for a usable identifier
+    session = _SessionWithHeaders(_bearer({"id": True}))
+    assert _identity_from_session(session) is None
+
+
+# ---- _candidate_ids_for: discovery, then identity, then guessing --------------
+
+def _id_endpoint():
+    return Endpoint(path="/orders/{order_id}", method="GET", operation_id="get_order")
+
+
+class _NoDiscoverySession(_SessionWithHeaders):
+    """No sibling POST in all_endpoints -- discover_resource_id() always
+    returns None, isolating _candidate_ids_for()'s identity-claim behavior."""
+
+
+def test_candidate_ids_for_includes_own_identity_before_guessing():
+    session = _NoDiscoverySession(_bearer({"sub": "realuser42"}))
+    ctx = ScanContext(base_url="http://x", session_a=session, all_endpoints=[_id_endpoint()])
+    candidates = _candidate_ids_for(_id_endpoint(), ctx)
+    assert candidates == ["realuser42", "1", "2", "3", "4", "5"]
+
+
+def test_candidate_ids_for_falls_back_to_guessing_without_a_jwt():
+    session = _NoDiscoverySession({})  # no Authorization header at all
+    ctx = ScanContext(base_url="http://x", session_a=session, all_endpoints=[_id_endpoint()])
+    assert _candidate_ids_for(_id_endpoint(), ctx) == ["1", "2", "3", "4", "5"]
+
+
+def test_candidate_ids_for_does_not_duplicate_identity_already_in_guess_list():
+    # a token whose claim happens to be a plain digit already in _CANDIDATE_IDS
+    session = _NoDiscoverySession(_bearer({"sub": "3"}))
+    ctx = ScanContext(base_url="http://x", session_a=session, all_endpoints=[_id_endpoint()])
+    candidates = _candidate_ids_for(_id_endpoint(), ctx)
+    assert candidates == ["3", "1", "2", "4", "5"]
+    assert candidates.count("3") == 1

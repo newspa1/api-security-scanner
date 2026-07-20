@@ -67,24 +67,37 @@ same endpoint (see tests/test_scan_all_targets.py's "vulnerable" target,
 now 8 findings, up from 7). Not a planted bug added for this check
 specifically -- a real gap that existed the whole time, now actually named.
 
-Attempted against VAmPI's own documented, manually-confirmed account
+RE-VERIFIED against VAmPI's own documented, manually-confirmed account
 takeover (`PUT /users/v1/{username}/password` -- exploitable: registered
 two identities, confirmed user B's write to user A's password succeeds,
-204 No Content, matching EXTERNAL_VALIDATION.md target 1 #4b) -- this
-check does NOT catch it, for the SAME reason bola.py's read-only version
-already doesn't: `/users/v1/{username}/password` is keyed by a
+204 No Content, matching EXTERNAL_VALIDATION.md target 1 #4b) -- this check
+originally did NOT catch it, for the same reason bola.py's read-only
+version didn't either: `/users/v1/{username}/password` is keyed by a
 CLIENT-CHOSEN username, not a server-generated id, and `_collection_path()`
 doesn't even match this path shape (it ends in "/password", not a bare
-`/{param}`), so `discover_resource_id()` never gets a chance to run at
-all -- straight to guessing `["1".."5"]`, none of which are real
-usernames, so no writable candidate is ever found for user A to lock onto
-in the first place. Confirmed directly: `_candidate_ids_for()` returns
-exactly `['1', '2', '3', '4', '5']` for this endpoint, no discovered id
-among them. This is an honest, expected limitation, not a defect in this
-check's own logic -- recovering client-chosen identifiers for BOLA (read OR
-write) the way mass_assignment.py's POST support already does via
-`find_item_endpoint_for_payload()` is real, acknowledged follow-up work,
-not solved here.
+`/{param}`), so `discover_resource_id()` never got a chance to run at all --
+straight to guessing `["1".."5"]`, none of which are real usernames.
+
+FIXED: `_candidate_ids_for()` (checks/base.py) now also tries the scanning
+identity's OWN username/id, decoded straight out of its own JWT
+(`_identity_from_session()` -- most JWTs carry it as a plaintext `sub` or
+`username` claim, confirmed on a real VAmPI token). Not a guess -- the
+scanning identity definitely has this exact id, since it's the account
+that logged in and got the token. Re-verified live after this fix: this
+check now correctly reports the account takeover,
+`id=jwtidA: user A's write got HTTP 204, user B's write to the SAME id
+(different identity) also got HTTP 204`. The same fix helps bola.py's
+read-only check too, confirmed separately finding the read-side BOLA on
+`GET /users/v1/{username}` for the same reason.
+
+Known limit, stated honestly: this only recovers the scanning identity's
+OWN id, which helps precisely for self-service-shaped endpoints
+(`/password`, `/profile`, ...) where the vulnerable resource happens to be
+"my own account, but someone else's copy of it" -- it does NOT help for an
+arbitrary OTHER user's resource with no relationship to the scanning
+identity's own claims (e.g. someone else's order, keyed by an id the
+scanning identity never had reason to know). That broader case remains
+open follow-up work.
 """
 
 from __future__ import annotations

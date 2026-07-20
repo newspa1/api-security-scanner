@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Protocol
 from urllib.parse import urljoin
 
+import jwt
 import requests
 
 from apisec.spec_loader import Endpoint
@@ -196,20 +197,103 @@ def _matches_public_path(path: str, patterns: list[str]) -> bool:
 
 _CANDIDATE_IDS = ["1", "2", "3", "4", "5"]
 
+# Common claim names a JWT uses to carry the authenticated identity's own
+# id/username -- checked in this order, first match wins.
+_IDENTITY_CLAIM_KEYS = ("username", "user_id", "userId", "sub", "uid", "id", "email")
+
+
+def _identity_from_session(session: requests.Session) -> str | None:
+    """Extract the authenticated identity's OWN id/username straight from
+    its bearer JWT, if it has one -- e.g. a `"sub": "alice"` or
+    `"username": "alice"` claim. Same unverified decode broken_auth.py
+    already uses to forge `alg=none` tokens: no signature check needed,
+    we're just reading claims out of OUR OWN token, already trusted by
+    definition (we didn't forge it, the target issued it to us).
+
+    This is a REAL, definitely-existing identifier -- unlike `_CANDIDATE_IDS`
+    guessing, which invents a value with no guarantee it corresponds to
+    anything. It closes a gap neither `discover_resource_id()` nor guessing
+    can: CLIENT-CHOSEN identifiers (e.g. a username picked at registration)
+    that the create response never echoes back, so there's nothing to
+    extract an id FROM -- but the token issued for THIS identity almost
+    always carries exactly that value as a claim.
+
+    Returns None for anything that doesn't apply: no Authorization header,
+    not a Bearer token, not a JWT (opaque session ids, API keys, ...), or a
+    JWT with none of the common identity claim names present.
+
+    LIVE-VERIFIED against the exact bug this was built to close: VAmPI's
+    documented, manually-confirmed account takeover
+    (`PUT /users/v1/{username}/password`, no ownership check -- see
+    EXTERNAL_VALIDATION.md target 1 #4b). VAmPI's JWTs carry the username
+    as `"sub"` -- confirmed by decoding a real token
+    (`{'exp': ..., 'iat': ..., 'sub': 'jwtidA'}`). Before this, neither
+    `bola.py` nor `write_bola.py` could reach this endpoint at all:
+    `_collection_path()` doesn't match its shape (ends in `/password`, not
+    a bare `/{param}`), so `discover_resource_id()` never even runs, and
+    numeric guessing never finds a real username. With this,
+    `_candidate_ids_for()` tries the scanning identity's own username
+    (extracted from its own token) and reaches the resource directly --
+    `write_bola.py` now correctly reports the real, exploitable finding,
+    confirmed via a live re-scan (`user A's write got HTTP 204, user B's
+    write to the SAME id also got HTTP 204`). Also confirmed as a genuine
+    side benefit for `bola.py`'s READ-only check, which had the identical
+    limitation on `GET /users/v1/{username}` and now finds that too.
+
+    Known limit, honestly stated: this only recovers ONE identifier per
+    scan (the scanning identity's own), not an arbitrary target resource's
+    id -- it helps precisely when the vulnerable endpoint happens to be
+    keyed by an id the scanner's OWN identity also has (a username, in
+    VAmPI's case), which is common for self-service endpoints
+    (`/password`, `/profile`, ...) but won't help for an arbitrary OTHER
+    user's resource with no relationship to the scanning identity's own
+    claims."""
+    auth_header = getattr(session, "headers", {}).get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.removeprefix("Bearer ")
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    for key in _IDENTITY_CLAIM_KEYS:
+        value = claims.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            return str(value)
+    return None
+
 
 def _candidate_ids_for(endpoint: Endpoint, ctx: ScanContext) -> list[str]:
-    """A real, discovered id (if one can be found) tried first, then the
-    numeric guesses as a fallback -- discovery can fail silently (no sibling
-    POST, POST rejected, no id in the response), so guessing stays as a
-    safety net rather than being replaced outright. Shared by bola.py,
-    mass_assignment.py, and missing_auth.py -- all three need "a real,
-    writable/readable id to test against", not just any placeholder."""
+    """Three sources of candidate ids, in order of how much we trust them:
+    1. A real, DISCOVERED id (`discover_resource_id()`) -- created a
+       resource ourselves and read its real id back. Most trustworthy: not
+       just real, but the RIGHT resource type for this exact endpoint.
+    2. The scanning identity's OWN id/username, pulled from its JWT
+       (`_identity_from_session()`) -- definitely a real, existing
+       identifier, but not necessarily the right resource type for THIS
+       endpoint (e.g. it's a username, and this endpoint wants an order
+       id). Closes the client-chosen-id gap discovery structurally can't:
+       when the resource's id is something the CALLER chose (a username at
+       registration) rather than something the server generates and
+       returns, there's no id in any create response to extract at all --
+       but the token issued for that identity still carries it as a claim.
+    3. Numeric guesses (`_CANDIDATE_IDS`) as the last-resort fallback.
+    Discovery can fail silently (no sibling POST, POST rejected, no id in
+    the response); the identity claim can be absent (non-JWT token, no
+    matching claim name) -- guessing stays as the final safety net rather
+    than either replacing it outright. Shared by bola.py, write_bola.py,
+    mass_assignment.py, and missing_auth.py."""
+    candidates: list[str] = []
     discovered = discover_resource_id(endpoint, ctx)
-    if discovered is None:
-        return _CANDIDATE_IDS
-    if discovered in _CANDIDATE_IDS:
-        return _CANDIDATE_IDS
-    return [discovered, *_CANDIDATE_IDS]
+    if discovered is not None:
+        candidates.append(discovered)
+    identity = _identity_from_session(ctx.session_a)
+    if identity is not None and identity not in candidates:
+        candidates.append(identity)
+    for candidate_id in _CANDIDATE_IDS:
+        if candidate_id not in candidates:
+            candidates.append(candidate_id)
+    return candidates
 
 
 def discover_resource_id(endpoint: Endpoint, ctx: ScanContext) -> str | None:
