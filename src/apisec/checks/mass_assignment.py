@@ -285,6 +285,11 @@ _CANDIDATE_BUSINESS_LOGIC_FIELDS: list[tuple[str, object]] = [
     ("balance", 999999),
 ]
 
+# Built-in candidates. An operator can extend this per-scan with
+# `--mass-assignment-fields` (parsed in cli.py, threaded through as
+# `ctx.custom_mass_assignment_fields`) for domain-specific sensitive field
+# names this list was never going to guess -- same escape-hatch pattern as
+# `--public-paths` elsewhere in this package. See `MassAssignmentCheck.run()`.
 _CANDIDATE_FIELDS: list[tuple[str, object]] = [
     *_CANDIDATE_PRIVILEGE_FIELDS,
     *_CANDIDATE_BUSINESS_LOGIC_FIELDS,
@@ -655,9 +660,10 @@ class MassAssignmentCheck:
             return []
 
         declared_fields = set((endpoint.request_body_schema or {}).get("properties", {}))
+        all_candidate_fields = [*_CANDIDATE_FIELDS, *ctx.custom_mass_assignment_fields]
         candidates = [
             (name, value)
-            for name, value in _CANDIDATE_FIELDS
+            for name, value in all_candidate_fields
             if name not in declared_fields
         ]
         if not candidates:

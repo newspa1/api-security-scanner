@@ -16,6 +16,7 @@ import pytest
 
 from apisec.checks import ALL_CHECKS
 from apisec.checks.base import ScanContext
+from apisec.scanner import _reweight_by_reachability
 from apisec.spec_loader import extract_endpoints
 from demo_apps.bola_only.app import _reset_state as reset_bola_only
 from demo_apps.bola_only.app import app as bola_only_app
@@ -109,6 +110,7 @@ def test_scan_reveals_expected_bugs(
     )
 
     findings = [f for ep in endpoints for check in ALL_CHECKS for f in check.run(ep, ctx)]
+    findings = _reweight_by_reachability(findings)
 
     print(f"\n{app.title}: {len(findings)} finding(s)")
     for f in findings:
@@ -118,3 +120,43 @@ def test_scan_reveals_expected_bugs(
 
     assert len(findings) == expected_count
     assert {(f.check_id, f.title) for f in findings} == expected_bug_types
+
+
+def test_reachability_reweighting_bumps_bola_on_the_unauthenticated_receipt_endpoint(sessions_for):
+    # GET /orders/{order_id}/receipt in demo_apps/vulnerable has no auth
+    # check at all -- both a CRITICAL Missing Authentication finding and a
+    # BOLA finding fire on it. Without reachability re-weighting the BOLA
+    # finding is HIGH (bola.py's normal severity); with it, "anyone on the
+    # internet can read this" makes it CRITICAL, same as any other finding
+    # sharing that endpoint. The OTHER BOLA finding, on /orders/{order_id}
+    # (which DOES require auth), must stay HIGH -- only the endpoint that's
+    # actually unauthenticated gets bumped.
+    reset_vulnerable()
+    client, (session_a, session_b) = sessions_for(vulnerable_app, ("alice", "alice-pw"), ("bob", "bob-pw"))
+    spec = client.get("/openapi.json").json()
+    endpoints = extract_endpoints(spec)
+    ctx = ScanContext(
+        base_url="http://testserver",
+        session_a=session_a,
+        session_b=session_b,
+        public_paths=["/announcements/*"],
+    )
+
+    findings = [f for ep in endpoints for check in ALL_CHECKS for f in check.run(ep, ctx)]
+    findings = _reweight_by_reachability(findings)
+
+    receipt_bola = next(
+        f
+        for f in findings
+        if f.endpoint == "/orders/{order_id}/receipt"
+        and f.title == "Broken Object Level Authorization (BOLA)"
+    )
+    assert receipt_bola.severity.value == "critical"
+    assert "no authentication at all" in receipt_bola.evidence
+
+    orders_bola = next(
+        f
+        for f in findings
+        if f.endpoint == "/orders/{order_id}" and f.title == "Broken Object Level Authorization (BOLA)"
+    )
+    assert orders_bola.severity.value == "high"

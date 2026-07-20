@@ -44,12 +44,24 @@ class ScanContext:
     -- e.g. a public product listing that requires login but isn't owned by
     any one user. BOLA can't infer this from spec/traffic alone (see its
     module docstring), so it's a human-declared escape hatch, same pattern as
-    a secret-scanner's baseline/allowlist file."""
+    a secret-scanner's baseline/allowlist file.
+
+    `custom_mass_assignment_fields` is an operator-supplied extension
+    (`--mass-assignment-fields`) to mass_assignment.py's built-in candidate
+    field list. The built-in list (privilege-flavored: role, is_admin, ...;
+    business-logic-flavored: status, price, ...) was chosen from patterns
+    seen on real targets during this project's own external validation, but
+    it can never cover every domain-specific sensitive field name a given
+    API might have (e.g. `subscription_tier`, `credit_limit`,
+    `tenant_id`) -- same reasoning as `public_paths` above: the scanner
+    can't infer an operator's own domain vocabulary, so it's a
+    human-supplied extension point, not automatic detection."""
 
     base_url: str
     session_a: requests.Session
     session_b: requests.Session | None = None
     public_paths: list[str] = field(default_factory=list)
+    custom_mass_assignment_fields: list[tuple[str, object]] = field(default_factory=list)
     # Every endpoint in the spec, not just the one currently under test.
     # Needed for discover_resource_id() below, which looks for a sibling
     # "collection" POST to create a real resource, rather than guessing ids.

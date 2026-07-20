@@ -194,6 +194,34 @@ def test_declared_business_logic_field_is_not_treated_as_a_finding():
     assert "status" in findings[0].evidence
 
 
+def test_custom_field_from_ctx_is_tested_alongside_built_in_candidates():
+    # --mass-assignment-fields "subscription_tier=premium" -- domain-specific
+    # field the built-in list was never going to guess.
+    session = _FakeSession({"id": 1, "name": "x"}, accept_fields=None)  # vulnerable
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        custom_mass_assignment_fields=[("subscription_tier", "premium")],
+    )
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert "subscription_tier" in findings[0].evidence
+    assert "role" in findings[0].evidence  # built-in candidates still run too
+
+
+def test_declared_custom_field_is_not_treated_as_a_finding():
+    schema = {"type": "object", "properties": {"subscription_tier": {"type": "string"}}}
+    session = _FakeSession({"id": 1}, accept_fields=None)
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        custom_mass_assignment_fields=[("subscription_tier", "premium")],
+    )
+    findings = MassAssignmentCheck().run(_patch_endpoint(schema), ctx)
+    assert len(findings) == 1
+    assert "subscription_tier" not in findings[0].evidence
+
+
 class _FakeNestedEnvelopeSession:
     """Simulates an API that wraps the resource one level deep on GET/write
     responses, e.g. crAPI's `GET /workshop/api/shop/orders/{id}` returning

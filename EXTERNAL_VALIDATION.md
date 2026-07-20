@@ -403,15 +403,22 @@ target it hadn't already been poked at -- worth being explicit about
 rather than letting "eventually it worked" read as "it worked cleanly the
 first time."
 
-#### 4c. A legitimate critique of the severity model
+#### 4c. A legitimate critique of the severity model — since resolved
 
 One of the follow-up passes raised a good point about §1: an *unauthenticated*
 endpoint dumping every user's plaintext password (including admin's) only
-scores `MEDIUM`, because `excessive_data_exposure.py`'s severity model
+scored `MEDIUM`, because `excessive_data_exposure.py`'s severity model
 counts corroborating *detection signals* (name match, value shape, schema
-absence), not real-world *impact* — it has no notion of "reachable with
+absence), not real-world *impact* — it had no notion of "reachable with
 zero auth," which is arguably the single biggest severity multiplier in
-practice. Worth reconsidering the scoring model; not changed in this pass.
+practice.
+
+**Resolved**: `_reweight_by_reachability()` (`scanner.py`) is a post-scan
+pass that bumps any finding sharing an endpoint with a `missing_auth.py`
+"no authentication required" finding up one severity level. Re-scanned
+`GET /users/v1/_debug` after this fix: the EDE finding there now reports
+`HIGH`, up from `MEDIUM` — exactly the critique above, now actually fixed,
+not just acknowledged.
 
 #### 4d. Side effect worth knowing about: `GET /createdb` is not read-only
 
@@ -442,7 +449,7 @@ implements. Not finding it is correct, not a miss.
 
 | VAmPI's documented bug | Result | Why |
 |---|---|---|
-| Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (MEDIUM — arguably under-scored, §4c) | True positive, first try |
+| Excessive Data Exposure (`/users/v1/_debug`) | ✅ **Caught** (HIGH — was MEDIUM, re-weighted by reachability, §4c) | True positive, first try; severity fixed once "reachable with zero auth" became a real signal |
 | Broken Auth false positives (5 endpoints) | 🔧 **Found & fixed in apisec** | Missing baseline "does this even check auth" probe |
 | EDE false positive (`help` field) | 🔧 **Found & fixed in apisec** | Entropy heuristic didn't exclude prose |
 | Unauthorized password change (account takeover) | ✅ **Caught** (CRITICAL) | `write_bola.py` + `_identity_from_session()` (decodes the scanning identity's own JWT for its username) — live-verified reaching the real bug, not just a mechanism proof (§4b). Full single-pass scans against VAmPI specifically don't reliably reproduce this due to `GET /createdb`'s side effect (§4d), a separate, already-documented target quirk |
@@ -1021,15 +1028,34 @@ about any of them.
   on read (crAPI's `{"order": {...}, "payment": {...}}`) could never
   progress past SUSPECTED, no matter how real the persistence was. Now
   mirrors `_extract_id_from_response()`'s existing one-level-deep lookup.
-- **A config surface for target-specific candidate fields** — even with the
-  broader built-in list above, any target with domain-specific sensitive
-  field names (neither privilege- nor the specific financial names guessed
-  here) still won't be reachable without a way to supply custom candidates.
-- **Re-weight severity by reachability**, not just detection-signal count
-  (VAmPI §4c) — an unauthenticated leak should plausibly outscore an
-  authenticated one with otherwise-identical evidence. Distinct from the
-  item below: this is about re-weighting existing findings, not detecting a
-  new class of bug.
+- ~~A config surface for target-specific candidate fields~~ — **done.**
+  `--mass-assignment-fields "name=value,..."` (`cli.py`'s
+  `_parse_mass_assignment_fields()`, threaded through as
+  `ctx.custom_mass_assignment_fields`) lets an operator extend the built-in
+  candidate list with fields specific to their own API's domain, values
+  type-inferred (bool/int/float/string) since `_classify_readback()`'s
+  exact-match comparison cares about type, not just string content.
+  Live-verified end to end via a real `apisec` CLI run: injecting
+  `subscription_tier=premium,credit_limit=999999` against the demo
+  vulnerable target correctly shows both custom fields alongside the
+  built-in candidates in the Mass Assignment finding's evidence.
+- ~~Re-weight severity by reachability~~ — **done.**
+  `_reweight_by_reachability()` (`scanner.py`) is a post-scan pass: any
+  finding sharing an (endpoint, method) with a "no authentication required"
+  finding (missing_auth.py's own signal) gets bumped up one severity level
+  — LOW→MEDIUM→HIGH→CRITICAL, CRITICAL unchanged (nowhere higher to go).
+  Directly closes the critique in VAmPI §4c (an unauthenticated leak
+  arguably outscores an identical authenticated one). Confirmed on this
+  repo's own demo target: `GET /orders/{order_id}/receipt` in
+  `demo_apps/vulnerable` (already known to produce both a CRITICAL
+  Missing-Auth finding and a HIGH BOLA finding, see missing_auth.py's
+  release) now correctly reports that BOLA finding as CRITICAL too, while
+  the OTHER BOLA finding on the properly-authenticated `/orders/{order_id}`
+  stays HIGH — live-verified via a real CLI run, not just unit tests.
+  Applied as a genuine scan-level pass (inside `scan()`, before the
+  CI-gate exit-code decision reads severities), not just a report-time
+  cosmetic change — a bumped finding really does affect whether the scan
+  exits non-zero.
 - ~~A fifth check: no authentication required at all~~ — **done.**
   `missing_auth.py` (`MissingAuthCheck`, API2:2023) strips the
   `Authorization` header entirely and flags anything that still succeeds —

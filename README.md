@@ -138,6 +138,7 @@ apisec --spec https://your-api.example.com/openapi.json \
 | `--auth-header` | no | Full `Authorization` header for one identity, e.g. `"Bearer eyJ..."` |
 | `--auth-header-b` | no | A second identity's header — enables BOLA (cross-user) checks |
 | `--public-paths` | no | Comma-separated glob patterns for endpoints you've confirmed are intentionally shared across users, e.g. `"/products/*,/announcements/*"` — suppresses BOLA false positives on them |
+| `--mass-assignment-fields` | no | Comma-separated `name=value` pairs of extra undeclared fields to try injecting, e.g. `"subscription_tier=premium,credit_limit=999999"` — extends the built-in candidate list with fields specific to your own API |
 | `--json-out` | no | Also write the full findings list to this JSON file |
 
 **Reading the report:** each finding has a severity (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`),
@@ -240,15 +241,24 @@ just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
       come up empty. Closed VAmPI's most severe documented bug: full
       account takeover via unauthenticated password change, on both the
       read and write side.
+- ✅ **A config surface for target-specific Mass Assignment candidate
+      fields** — `--mass-assignment-fields "name=value,..."` extends the
+      built-in candidate list with fields specific to your own API's
+      domain (e.g. `subscription_tier`, `credit_limit`), the same
+      human-supplied-escape-hatch pattern as `--public-paths`.
+- ✅ **Re-weight finding severity by reachability** — any finding sharing
+      an endpoint with a "no authentication required" finding gets bumped
+      up one severity level (e.g. a HIGH BOLA becomes CRITICAL), since
+      "anyone on the internet can reach this" is strictly worse than the
+      identical bug behind a login wall. Confirmed on this repo's own demo
+      target.
 
 **Stretch**
-- [ ] A config surface for target-specific Mass Assignment candidate fields
 - [ ] Recovering an ARBITRARY other user's client-chosen id for BOLA — the
-      fix above only recovers the scanning identity's OWN id (works for
-      "my own resource, someone else has a copy of it too" endpoints like
-      `/password`; doesn't help for an unrelated other user's resource)
-- [ ] Re-weight finding severity by reachability, not just detection-signal
-      count
+      identity-recovery fix above only recovers the scanning identity's
+      OWN id (works for "my own resource, someone else has a copy of it
+      too" endpoints like `/password`; doesn't help for an unrelated other
+      user's resource)
 - [ ] Simple web dashboard for scan results
 
 ## License
