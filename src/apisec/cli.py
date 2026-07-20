@@ -117,6 +117,15 @@ def main(argv: list[str] | None = None) -> int:
         "per line (# comments allowed). Values are parsed as bool/int/float "
         "where possible, otherwise kept as strings.",
     )
+    parser.add_argument(
+        "--auto-discover-fields",
+        action="store_true",
+        help="Automatically mine extra Mass Assignment candidate fields from "
+        "the target's OWN OpenAPI spec: any property name declared ANYWHERE "
+        "in the spec becomes a candidate on endpoints that don't declare it "
+        "themselves -- no manual research or typing needed. Off by default, "
+        "since more candidates means more test writes per endpoint.",
+    )
     parser.add_argument("--json-out", help="Also write findings to this JSON file")
     args = parser.parse_args(argv)
 
@@ -129,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         auth_header_b=args.auth_header_b,
         public_paths=public_paths,
         custom_mass_assignment_fields=custom_mass_assignment_fields,
+        auto_discover_fields=args.auto_discover_fields,
     )
     print_report(findings)
     if args.json_out:

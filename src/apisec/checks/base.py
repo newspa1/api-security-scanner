@@ -55,13 +55,24 @@ class ScanContext:
     API might have (e.g. `subscription_tier`, `credit_limit`,
     `tenant_id`) -- same reasoning as `public_paths` above: the scanner
     can't infer an operator's own domain vocabulary, so it's a
-    human-supplied extension point, not automatic detection."""
+    human-supplied extension point, not automatic detection.
+
+    `auto_discover_fields` (`--auto-discover-fields`) is the automatic
+    counterpart to `custom_mass_assignment_fields`: instead of a human
+    typing field names in, mine them straight from the target's own spec
+    (`discover_candidate_fields()`, above) -- every property name declared
+    ANYWHERE in the spec becomes a candidate on endpoints that don't
+    declare it themselves. Opt-in, not the default: more candidates means
+    more test writes per endpoint, and a large spec could mean a real
+    increase in request volume/side effects on the target, which shouldn't
+    change silently for every scan."""
 
     base_url: str
     session_a: requests.Session
     session_b: requests.Session | None = None
     public_paths: list[str] = field(default_factory=list)
     custom_mass_assignment_fields: list[tuple[str, object]] = field(default_factory=list)
+    auto_discover_fields: bool = False
     # Every endpoint in the spec, not just the one currently under test.
     # Needed for discover_resource_id() below, which looks for a sibling
     # "collection" POST to create a real resource, rather than guessing ids.
@@ -118,6 +129,70 @@ def build_legit_payload(schema: dict | None) -> dict:
         prop_type = prop_schema.get("type") if isinstance(prop_schema, dict) else None
         payload[name] = _TYPE_PLACEHOLDERS.get(prop_type, "apisec-test")
     return payload
+
+
+def _collect_field_placeholders(
+    schema: object, declared_fields: set[str], discovered: dict[str, object], _nested: bool = False
+) -> None:
+    """Collects `{name: placeholder}` from a schema's top-level properties
+    into `discovered`, then looks ONE level deeper into any property that's
+    itself an object, or an array of objects -- same one-level-deep
+    convention used throughout this package (`_extract_id_from_response`,
+    `_classify_readback`, mass_assignment.py's `_find_list_in_body`).
+    Confirmed necessary, not just theoretical: VAmPI's own `_debug`
+    response schema wraps every user field one level down inside an array
+    (`{"users": {"type": "array", "items": {"type": "object",
+    "properties": {"admin": ..., "username": ..., ...}}}}`) -- a top-level-
+    only scan would see `users` and stop, never finding `admin` at all,
+    even though it's right there in the target's own spec. `_nested`
+    guards against recursing past one level, matching the rest of this
+    package's deliberate depth limit."""
+    if not isinstance(schema, dict):
+        return
+    props = schema.get("properties", {})
+    if not isinstance(props, dict):
+        return
+    for name, prop_schema in props.items():
+        if not isinstance(prop_schema, dict):
+            continue
+        prop_type = prop_schema.get("type")
+        if name not in declared_fields and name not in discovered:
+            discovered[name] = _TYPE_PLACEHOLDERS.get(prop_type, "apisec-test")
+        if _nested:
+            continue
+        if prop_type == "object":
+            _collect_field_placeholders(prop_schema, declared_fields, discovered, _nested=True)
+        elif prop_type == "array":
+            items = prop_schema.get("items")
+            _collect_field_placeholders(items, declared_fields, discovered, _nested=True)
+
+
+def discover_candidate_fields(
+    all_endpoints: list[Endpoint], declared_fields: set[str]
+) -> list[tuple[str, object]]:
+    """Auto-discover extra Mass Assignment candidate fields straight from
+    the target's OWN spec, instead of a human typing them in
+    (`--mass-assignment-fields`) or relying only on the hardcoded built-in
+    list (`_CANDIDATE_FIELDS`, mass_assignment.py). Walks EVERY schema in
+    the spec -- every endpoint's request body AND response schema, not
+    just the one endpoint under test -- and collects property names that
+    appear somewhere in the API but aren't declared on THIS endpoint
+    (`declared_fields`), one level deep too (see `_collect_field_placeholders()`).
+    If the spec documents a `subscription_tier` field anywhere at all (even
+    a totally different endpoint's response), that's a real, spec-derived
+    signal this API's domain has that field -- a much better source of
+    "what might be missing here" than a fixed, target-agnostic list can
+    ever be, and it needs no manual research.
+
+    One placeholder value per discovered field, picked by JSON Schema
+    `type` the same way `build_legit_payload()` does. First schema to
+    declare a given name wins if types conflict across schemas -- a rare
+    edge case, not worth extra complexity to resolve "correctly"."""
+    discovered: dict[str, object] = {}
+    for endpoint in all_endpoints:
+        for schema in (endpoint.request_body_schema, endpoint.response_schema):
+            _collect_field_placeholders(schema, declared_fields, discovered)
+    return list(discovered.items())
 
 
 def _collection_path(item_path: str) -> str | None:

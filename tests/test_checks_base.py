@@ -21,6 +21,7 @@ from apisec.checks.base import (
     _identity_from_session,
     _item_endpoint_for_collection_path,
     build_legit_payload,
+    discover_candidate_fields,
     discover_resource_id,
     find_item_endpoint_for_payload,
 )
@@ -45,6 +46,89 @@ def test_build_legit_payload_fills_declared_properties_by_type():
 def test_build_legit_payload_handles_missing_schema():
     assert build_legit_payload(None) == {}
     assert build_legit_payload({}) == {}
+
+
+# ---- discover_candidate_fields --------------------------------------------------
+
+def _endpoint_with_schemas(path, method, request_schema=None, response_schema=None):
+    return Endpoint(
+        path=path,
+        method=method,
+        operation_id="x",
+        request_body_schema=request_schema,
+        response_schema=response_schema,
+    )
+
+
+def test_discover_candidate_fields_finds_property_from_a_different_endpoints_response():
+    # /users/{id} GET's response declares "subscription_tier", which
+    # /users/{id} PATCH's own request body never does -- a real,
+    # spec-derived candidate, no manual typing.
+    endpoints = [
+        _endpoint_with_schemas(
+            "/users/{id}",
+            "GET",
+            response_schema={
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "subscription_tier": {"type": "string"}},
+            },
+        ),
+        _endpoint_with_schemas("/users/{id}", "PATCH", request_schema={"type": "object", "properties": {}}),
+    ]
+    result = discover_candidate_fields(endpoints, declared_fields=set())
+    assert ("subscription_tier", "apisec-test") in result
+    assert ("id", 1) in result  # also discovered, just less interesting
+
+
+def test_discover_candidate_fields_excludes_fields_already_declared_here():
+    endpoints = [
+        _endpoint_with_schemas(
+            "/users/{id}",
+            "GET",
+            response_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+        ),
+    ]
+    result = discover_candidate_fields(endpoints, declared_fields={"name"})
+    assert result == []
+
+
+def test_discover_candidate_fields_deduplicates_across_schemas():
+    endpoints = [
+        _endpoint_with_schemas(
+            "/a", "GET", response_schema={"type": "object", "properties": {"tier": {"type": "string"}}}
+        ),
+        _endpoint_with_schemas(
+            "/b", "POST", request_schema={"type": "object", "properties": {"tier": {"type": "string"}}}
+        ),
+    ]
+    result = discover_candidate_fields(endpoints, declared_fields=set())
+    assert result.count(("tier", "apisec-test")) == 1
+
+
+def test_discover_candidate_fields_picks_placeholder_by_type():
+    endpoints = [
+        _endpoint_with_schemas(
+            "/a",
+            "GET",
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "is_verified": {"type": "boolean"},
+                    "balance": {"type": "number"},
+                    "count": {"type": "integer"},
+                },
+            },
+        ),
+    ]
+    result = discover_candidate_fields(endpoints, declared_fields=set())
+    assert ("is_verified", True) in result
+    assert ("balance", 1.0) in result
+    assert ("count", 1) in result
+
+
+def test_discover_candidate_fields_returns_nothing_when_spec_has_no_schemas():
+    endpoints = [Endpoint(path="/health", method="GET", operation_id="health")]
+    assert discover_candidate_fields(endpoints, declared_fields=set()) == []
 
 
 # ---- _collection_path -----------------------------------------------------------

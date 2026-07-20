@@ -222,6 +222,68 @@ def test_declared_custom_field_is_not_treated_as_a_finding():
     assert "subscription_tier" not in findings[0].evidence
 
 
+def test_auto_discover_fields_finds_a_field_from_a_sibling_endpoints_schema():
+    # A different endpoint's response schema declares "subscription_tier";
+    # /things/{id} PATCH never does -- auto-discovery should pick it up
+    # with no --mass-assignment-fields needed at all.
+    session = _FakeSession({"id": 1, "name": "x"}, accept_fields=None)  # vulnerable
+    sibling = Endpoint(
+        path="/things/{id}",
+        method="GET",
+        operation_id="get_thing",
+        response_schema={
+            "type": "object",
+            "properties": {"id": {"type": "integer"}, "subscription_tier": {"type": "string"}},
+        },
+    )
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        auto_discover_fields=True,
+        all_endpoints=[_patch_endpoint(), sibling],
+    )
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert "subscription_tier" in findings[0].evidence
+    assert "role" in findings[0].evidence  # built-in candidates still run too
+
+
+def test_auto_discover_fields_off_by_default():
+    # same setup as above, but auto_discover_fields left at its default
+    # (False) -- the sibling-declared field must NOT be tested.
+    session = _FakeSession({"id": 1, "name": "x"}, accept_fields=None)
+    sibling = Endpoint(
+        path="/things/{id}",
+        method="GET",
+        operation_id="get_thing",
+        response_schema={"type": "object", "properties": {"subscription_tier": {"type": "string"}}},
+    )
+    ctx = ScanContext(base_url="http://x", session_a=session, all_endpoints=[_patch_endpoint(), sibling])
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert len(findings) == 1
+    assert "subscription_tier" not in findings[0].evidence
+
+
+def test_auto_discover_fields_does_not_duplicate_a_built_in_candidate():
+    # "status" is already a built-in business-logic candidate; a sibling
+    # endpoint ALSO happens to declare it -- must not be tested twice.
+    session = _FakeSession({"id": 1, "name": "x"}, accept_fields=None)
+    sibling = Endpoint(
+        path="/things/{id}",
+        method="GET",
+        operation_id="get_thing",
+        response_schema={"type": "object", "properties": {"status": {"type": "string"}}},
+    )
+    ctx = ScanContext(
+        base_url="http://x",
+        session_a=session,
+        auto_discover_fields=True,
+        all_endpoints=[_patch_endpoint(), sibling],
+    )
+    findings = MassAssignmentCheck().run(_patch_endpoint(), ctx)
+    assert findings[0].evidence.count("status") == 1
+
+
 class _FakeNestedEnvelopeSession:
     """Simulates an API that wraps the resource one level deep on GET/write
     responses, e.g. crAPI's `GET /workshop/api/shop/orders/{id}` returning

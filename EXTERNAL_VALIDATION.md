@@ -956,6 +956,18 @@ about any of them.
   hard part was recognizing that the token the scanner ALREADY holds is
   itself a source of real, trustworthy identifiers — not building new
   machinery to go find one.
+- **The same one-level-deep mistake keeps showing up in new code, because
+  it's an easy default to reach for.** `discover_candidate_fields()`'s
+  first version only scanned a schema's top-level properties — the exact
+  same shallow-scan bug `_classify_readback()` had before it was fixed for
+  crAPI's `{"order": {...}}` envelope, and `_search_lists_for_field()` had
+  to be built around from the start for VAmPI's `{"users": [...]}` list.
+  Live-testing against VAmPI caught it a third time (its `_debug` schema
+  wraps user fields inside an array), fixed the same way as the other two.
+  Worth remembering as a category, not three unrelated bugs: any new code
+  that reads a JSON Schema or a JSON response body should assume the
+  interesting field might be one level deeper than the obvious top-level
+  spot, because real API shapes very often are.
 
 ## Future work
 
@@ -1078,6 +1090,34 @@ about any of them.
 
   Identical result, confirmed via a real run: same evidence string, same
   two custom fields present.
+- ~~Auto-discover candidate fields from the target's own spec~~ — **done.**
+  Prompted directly by user feedback on the manual config surface above
+  ("added by hand is very stupid"): `--auto-discover-fields`
+  (`discover_candidate_fields()`, checks/base.py) mines every property
+  name declared ANYWHERE in the target's OpenAPI spec -- not just the one
+  endpoint under test -- as a candidate, no typing or research needed at
+  all. First live check against VAmPI came back with `admin` missing
+  entirely, which looked like a bug in the idea itself; the actual cause
+  was a real, findable one: VAmPI's `GET /users/v1/_debug` response schema
+  wraps every user field one level down inside an array
+  (`{"users": {"type": "array", "items": {"properties": {"admin": ...}}}}`),
+  and the first version of `discover_candidate_fields()` only scanned
+  top-level schema properties, the same "top-level-only" mistake
+  `_classify_readback()` made and got fixed for earlier in this document
+  (§4, crAPI). **Fixed the same way**: one level of recursion into any
+  property that's an object or an array of objects, matching the
+  one-level-deep convention this package already uses in three other
+  places. Re-checked after the fix: `admin` now discovered correctly, with
+  placeholder value `True` inferred straight from its declared `boolean`
+  type -- confirmed via a full live `apisec --auto-discover-fields` run
+  against VAmPI, `admin` still reaches `HIGH -- undeclared field(s)
+  accepted and persisted`. Genuinely additive, not just re-deriving what
+  the built-in list already had: the same run's SUSPECTED list included
+  several fields the built-in list never had at all (`auth_token`,
+  `secret`, `Books`, `book_title`, ...), pulled straight from VAmPI's own
+  documented schemas. Opt-in (`ScanContext.auto_discover_fields`, default
+  `False`) -- more candidates means more test writes per endpoint, which
+  shouldn't change silently for every scan.
 - ~~Re-weight severity by reachability~~ — **done.**
   `_reweight_by_reachability()` (`scanner.py`) is a post-scan pass: any
   finding sharing an (endpoint, method) with a "no authentication required"

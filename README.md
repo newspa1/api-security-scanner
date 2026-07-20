@@ -139,6 +139,7 @@ apisec --spec https://your-api.example.com/openapi.json \
 | `--auth-header-b` | no | A second identity's header — enables BOLA (cross-user) checks |
 | `--public-paths` | no | Comma-separated glob patterns for endpoints you've confirmed are intentionally shared across users, e.g. `"/products/*,/announcements/*"` — suppresses BOLA false positives on them |
 | `--mass-assignment-fields` | no | Extra undeclared fields to try injecting, extending the built-in candidate list with fields specific to your own API. Inline: `"tier=premium,limit=9999"`. Or `"@fields.txt"` to read a longer, reusable list from a file (JSON object, or one `name=value` per line with `#` comments) |
+| `--auto-discover-fields` | no | Automatically mine extra Mass Assignment candidate fields from the target's own OpenAPI spec — no manual research needed, off by default since more candidates means more test writes |
 | `--json-out` | no | Also write the full findings list to this JSON file |
 
 **Reading the report:** each finding has a severity (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`),
@@ -248,6 +249,17 @@ just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
       human-supplied-escape-hatch pattern as `--public-paths`. Also
       accepts `"@fields.txt"` to read a longer, reusable list from a file
       instead of one long comma-joined string.
+- ✅ **Auto-discovering Mass Assignment candidate fields from the target's
+      own spec** — `--auto-discover-fields` mines every property name
+      declared anywhere in the OpenAPI spec (not just the endpoint under
+      test) as a candidate, no manual research or typing needed at all.
+      Live-verified on VAmPI: correctly discovered `admin` straight from
+      `GET /users/v1/_debug`'s response schema (nested one level inside an
+      array, matching the field's real, undeclared shape) with zero
+      hardcoded knowledge of VAmPI specifically, plus several genuinely
+      new candidates the built-in list never had (`auth_token`, `secret`,
+      ...). Opt-in, not the default — more candidates means more test
+      writes per endpoint.
 - ✅ **Re-weight finding severity by reachability** — any finding sharing
       an endpoint with a "no authentication required" finding gets bumped
       up one severity level (e.g. a HIGH BOLA becomes CRITICAL), since

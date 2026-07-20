@@ -68,6 +68,7 @@ def scan(
     auth_header_b: str | None = None,
     public_paths: list[str] | None = None,
     custom_mass_assignment_fields: list[tuple[str, object]] | None = None,
+    auto_discover_fields: bool = False,
 ) -> list[Finding]:
     spec = load_spec(spec_path)
     endpoints = extract_endpoints(spec)
@@ -87,6 +88,7 @@ def scan(
         session_b=session_b,
         public_paths=public_paths or [],
         custom_mass_assignment_fields=custom_mass_assignment_fields or [],
+        auto_discover_fields=auto_discover_fields,
         all_endpoints=endpoints,
     )
 

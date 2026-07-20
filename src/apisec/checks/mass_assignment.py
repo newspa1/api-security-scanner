@@ -248,6 +248,7 @@ from apisec.checks.base import (
     _candidate_ids_for,
     build_legit_payload,
     concrete_url,
+    discover_candidate_fields,
     find_item_endpoint_for_payload,
 )
 from apisec.spec_loader import Endpoint
@@ -285,11 +286,15 @@ _CANDIDATE_BUSINESS_LOGIC_FIELDS: list[tuple[str, object]] = [
     ("balance", 999999),
 ]
 
-# Built-in candidates. An operator can extend this per-scan with
-# `--mass-assignment-fields` (parsed in cli.py, threaded through as
-# `ctx.custom_mass_assignment_fields`) for domain-specific sensitive field
-# names this list was never going to guess -- same escape-hatch pattern as
-# `--public-paths` elsewhere in this package. See `MassAssignmentCheck.run()`.
+# Built-in candidates. An operator can extend this per-scan two ways: by
+# HAND, with `--mass-assignment-fields` (parsed in cli.py, threaded through
+# as `ctx.custom_mass_assignment_fields`) for domain-specific sensitive
+# field names this list was never going to guess -- same escape-hatch
+# pattern as `--public-paths` elsewhere in this package -- or
+# AUTOMATICALLY, with `--auto-discover-fields` (`ctx.auto_discover_fields`,
+# `discover_candidate_fields()` in checks/base.py), which mines candidate
+# field names straight from the target's OWN spec instead of requiring
+# manual research at all. See `MassAssignmentCheck.run()`.
 _CANDIDATE_FIELDS: list[tuple[str, object]] = [
     *_CANDIDATE_PRIVILEGE_FIELDS,
     *_CANDIDATE_BUSINESS_LOGIC_FIELDS,
@@ -661,11 +666,15 @@ class MassAssignmentCheck:
 
         declared_fields = set((endpoint.request_body_schema or {}).get("properties", {}))
         all_candidate_fields = [*_CANDIDATE_FIELDS, *ctx.custom_mass_assignment_fields]
-        candidates = [
-            (name, value)
-            for name, value in all_candidate_fields
-            if name not in declared_fields
-        ]
+        if ctx.auto_discover_fields:
+            all_candidate_fields += discover_candidate_fields(ctx.all_endpoints, declared_fields)
+        seen_names: set[str] = set()
+        candidates = []
+        for name, value in all_candidate_fields:
+            if name in declared_fields or name in seen_names:
+                continue
+            seen_names.add(name)
+            candidates.append((name, value))
         if not candidates:
             return []
 
