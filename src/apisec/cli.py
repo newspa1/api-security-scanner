@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from apisec.report import print_report, write_json_report
 from apisec.scanner import scan
@@ -27,13 +29,11 @@ def _infer_value_type(raw: str) -> object:
     return raw
 
 
-def _parse_mass_assignment_fields(raw: str) -> list[tuple[str, object]]:
-    """Parses `--mass-assignment-fields "field1=value1,field2=value2"` into
-    the same `[(name, value), ...]` shape mass_assignment.py's own built-in
+def _parse_inline_fields(raw: str) -> list[tuple[str, object]]:
+    """Parses `"field1=value1,field2=value2"` into the same
+    `[(name, value), ...]` shape mass_assignment.py's own built-in
     candidate list uses. Malformed entries (no `=`) are skipped rather than
     raising -- a typo in one field name shouldn't abort using the rest."""
-    if not raw:
-        return []
     fields = []
     for item in raw.split(","):
         item = item.strip()
@@ -42,6 +42,45 @@ def _parse_mass_assignment_fields(raw: str) -> list[tuple[str, object]]:
         name, _, value = item.partition("=")
         fields.append((name.strip(), _infer_value_type(value.strip())))
     return fields
+
+
+def _parse_fields_file(path: str) -> list[tuple[str, object]]:
+    """Parses a `--mass-assignment-fields @path` file, in one of two
+    formats, auto-detected: a JSON object (`{"field": value, ...}` --
+    types come straight from JSON, no inference needed), or a plain-text
+    file with one `name=value` per line (same inline syntax as the
+    comma-separated flag, blank lines and `#`-comments ignored) -- for
+    quick hand-editing without JSON's punctuation, and for leaving notes
+    about WHY a field is a candidate next to the field itself."""
+    text = Path(path).read_text()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        return list(data.items())
+
+    fields = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        fields.append((name.strip(), _infer_value_type(value.strip())))
+    return fields
+
+
+def _parse_mass_assignment_fields(raw: str) -> list[tuple[str, object]]:
+    """Entry point for `--mass-assignment-fields`: either the inline
+    "name=value,name2=value2" form, or "@path/to/file" (the same
+    convention curl's `-d @file` and similar tools use) for a longer,
+    reusable, shareable, version-controllable list that doesn't need
+    retyping -- or re-escaping through shell quoting -- on every scan."""
+    if not raw:
+        return []
+    if raw.startswith("@"):
+        return _parse_fields_file(raw[1:])
+    return _parse_inline_fields(raw)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,12 +108,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--mass-assignment-fields",
-        help="Comma-separated name=value pairs of extra undeclared fields to "
-        'try injecting, e.g. "subscription_tier=premium,credit_limit=999999". '
-        "Extends the built-in candidate list (role, is_admin, price, ...) "
-        "with fields specific to your own API's domain, which a generic "
-        "built-in list was never going to guess. Values are parsed as bool/"
-        "int/float where possible, otherwise kept as strings.",
+        help="Extra undeclared fields to try injecting, extending the "
+        "built-in candidate list (role, is_admin, price, ...) with fields "
+        "specific to your own API's domain. Two forms: inline "
+        'comma-separated name=value pairs (e.g. "tier=premium,limit=9999"), '
+        'or "@path/to/file" to read a longer, reusable list from a file '
+        "-- either a JSON object ({\"tier\": \"premium\"}) or one name=value "
+        "per line (# comments allowed). Values are parsed as bool/int/float "
+        "where possible, otherwise kept as strings.",
     )
     parser.add_argument("--json-out", help="Also write findings to this JSON file")
     args = parser.parse_args(argv)

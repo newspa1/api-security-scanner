@@ -1029,16 +1029,55 @@ about any of them.
   progress past SUSPECTED, no matter how real the persistence was. Now
   mirrors `_extract_id_from_response()`'s existing one-level-deep lookup.
 - ~~A config surface for target-specific candidate fields~~ — **done.**
-  `--mass-assignment-fields "name=value,..."` (`cli.py`'s
-  `_parse_mass_assignment_fields()`, threaded through as
-  `ctx.custom_mass_assignment_fields`) lets an operator extend the built-in
-  candidate list with fields specific to their own API's domain, values
-  type-inferred (bool/int/float/string) since `_classify_readback()`'s
-  exact-match comparison cares about type, not just string content.
-  Live-verified end to end via a real `apisec` CLI run: injecting
-  `subscription_tier=premium,credit_limit=999999` against the demo
-  vulnerable target correctly shows both custom fields alongside the
-  built-in candidates in the Mass Assignment finding's evidence.
+  `--mass-assignment-fields` (`cli.py`'s `_parse_mass_assignment_fields()`,
+  threaded through as `ctx.custom_mass_assignment_fields`) lets an
+  operator extend the built-in candidate list with fields specific to
+  their own API's domain, values type-inferred (bool/int/float/string)
+  since `_classify_readback()`'s exact-match comparison cares about type,
+  not just string content. Not tested against VAmPI or crAPI specifically
+  — neither target's actual documented bugs needed a field outside the
+  built-in list, so there was nothing external to reproduce this against.
+  Verified instead against this repo's own `demo_apps/vulnerable`
+  (reproducible below), the same way most of this project's own unit/
+  integration tests validate mechanisms in isolation before a real target
+  happens to need them:
+
+  ```bash
+  uvicorn demo_apps.vulnerable.app:app --port 8000 &
+  TOKEN_A=$(curl -s -X POST http://localhost:8000/login -H 'Content-Type: application/json' -d '{"username":"alice","password":"alice-pw"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+  TOKEN_B=$(curl -s -X POST http://localhost:8000/login -H 'Content-Type: application/json' -d '{"username":"bob","password":"bob-pw"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+  apisec --spec http://localhost:8000/openapi.json --target http://localhost:8000 \
+    --auth-header "Bearer $TOKEN_A" --auth-header-b "Bearer $TOKEN_B" \
+    --mass-assignment-fields "subscription_tier=premium,credit_limit=999999"
+  ```
+
+  Real output, `PATCH /users/{user_id}`'s Mass Assignment finding:
+  `id=1: undeclared field(s) accepted and persisted: role, is_admin,
+  isAdmin, admin, permissions, status, is_paid, price, discount_percent,
+  balance, subscription_tier, credit_limit` — the two custom fields
+  correctly injected and confirmed alongside every built-in candidate.
+
+  **Follow-up improvement, prompted by a fair usability question**: a
+  single comma-joined string doesn't scale past a handful of fields, and
+  gets awkward to re-type or version-control. `--mass-assignment-fields`
+  now also accepts `@path/to/file` (same convention curl's `-d @file`
+  uses) -- either a JSON object or one `name=value` per line with
+  `#`-comments, for a longer, reusable, shareable list. Re-verified with
+  a file instead of an inline string, same target, same result:
+
+  ```bash
+  cat > fields.txt <<'FIELDS'
+  # custom Mass Assignment candidates for this target's own domain
+  subscription_tier=premium
+  credit_limit=999999
+  FIELDS
+  apisec --spec http://localhost:8000/openapi.json --target http://localhost:8000 \
+    --auth-header "Bearer $TOKEN_A" --auth-header-b "Bearer $TOKEN_B" \
+    --mass-assignment-fields "@fields.txt"
+  ```
+
+  Identical result, confirmed via a real run: same evidence string, same
+  two custom fields present.
 - ~~Re-weight severity by reachability~~ — **done.**
   `_reweight_by_reachability()` (`scanner.py`) is a post-scan pass: any
   finding sharing an (endpoint, method) with a "no authentication required"

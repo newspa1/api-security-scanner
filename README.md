@@ -138,7 +138,7 @@ apisec --spec https://your-api.example.com/openapi.json \
 | `--auth-header` | no | Full `Authorization` header for one identity, e.g. `"Bearer eyJ..."` |
 | `--auth-header-b` | no | A second identity's header — enables BOLA (cross-user) checks |
 | `--public-paths` | no | Comma-separated glob patterns for endpoints you've confirmed are intentionally shared across users, e.g. `"/products/*,/announcements/*"` — suppresses BOLA false positives on them |
-| `--mass-assignment-fields` | no | Comma-separated `name=value` pairs of extra undeclared fields to try injecting, e.g. `"subscription_tier=premium,credit_limit=999999"` — extends the built-in candidate list with fields specific to your own API |
+| `--mass-assignment-fields` | no | Extra undeclared fields to try injecting, extending the built-in candidate list with fields specific to your own API. Inline: `"tier=premium,limit=9999"`. Or `"@fields.txt"` to read a longer, reusable list from a file (JSON object, or one `name=value` per line with `#` comments) |
 | `--json-out` | no | Also write the full findings list to this JSON file |
 
 **Reading the report:** each finding has a severity (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`),
@@ -245,7 +245,9 @@ just this repo's own demo apps) — see `EXTERNAL_VALIDATION.md`:**
       fields** — `--mass-assignment-fields "name=value,..."` extends the
       built-in candidate list with fields specific to your own API's
       domain (e.g. `subscription_tier`, `credit_limit`), the same
-      human-supplied-escape-hatch pattern as `--public-paths`.
+      human-supplied-escape-hatch pattern as `--public-paths`. Also
+      accepts `"@fields.txt"` to read a longer, reusable list from a file
+      instead of one long comma-joined string.
 - ✅ **Re-weight finding severity by reachability** — any finding sharing
       an endpoint with a "no authentication required" finding gets bumped
       up one severity level (e.g. a HIGH BOLA becomes CRITICAL), since

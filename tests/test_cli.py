@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apisec.cli import _infer_value_type, _parse_mass_assignment_fields
+from apisec.cli import _infer_value_type, _parse_fields_file, _parse_mass_assignment_fields
 
 
 def test_infer_value_type_bool():
@@ -52,3 +52,64 @@ def test_parse_mass_assignment_fields_skips_malformed_entries():
 
 def test_parse_mass_assignment_fields_empty_string():
     assert _parse_mass_assignment_fields("") == []
+
+
+# ---- @file support --------------------------------------------------------
+
+def test_parse_fields_file_json_object(tmp_path):
+    path = tmp_path / "fields.json"
+    path.write_text('{"subscription_tier": "premium", "credit_limit": 999999, "is_verified": true}')
+    assert _parse_fields_file(str(path)) == [
+        ("subscription_tier", "premium"),
+        ("credit_limit", 999999),
+        ("is_verified", True),
+    ]
+
+
+def test_parse_fields_file_name_equals_value_lines(tmp_path):
+    path = tmp_path / "fields.txt"
+    path.write_text("subscription_tier=premium\ncredit_limit=999999\nis_verified=true\n")
+    assert _parse_fields_file(str(path)) == [
+        ("subscription_tier", "premium"),
+        ("credit_limit", 999999),
+        ("is_verified", True),
+    ]
+
+
+def test_parse_fields_file_ignores_blank_lines_and_comments(tmp_path):
+    path = tmp_path / "fields.txt"
+    path.write_text(
+        "# fields found by reading the target's own API docs\n"
+        "\n"
+        "tenant_id=42\n"
+        "\n"
+        "# this one grants admin on signup\n"
+        "is_admin=true\n"
+    )
+    assert _parse_fields_file(str(path)) == [("tenant_id", 42), ("is_admin", True)]
+
+
+def test_parse_fields_file_skips_malformed_lines(tmp_path):
+    path = tmp_path / "fields.txt"
+    path.write_text("valid_field=1\njust a line with no equals sign\nanother_field=2\n")
+    assert _parse_fields_file(str(path)) == [("valid_field", 1), ("another_field", 2)]
+
+
+def test_parse_mass_assignment_fields_at_prefix_reads_json_file(tmp_path):
+    path = tmp_path / "fields.json"
+    path.write_text('{"tier": "gold"}')
+    assert _parse_mass_assignment_fields(f"@{path}") == [("tier", "gold")]
+
+
+def test_parse_mass_assignment_fields_at_prefix_reads_text_file(tmp_path):
+    path = tmp_path / "fields.txt"
+    path.write_text("tier=gold\n")
+    assert _parse_mass_assignment_fields(f"@{path}") == [("tier", "gold")]
+
+
+def test_parse_mass_assignment_fields_without_at_prefix_stays_inline():
+    # a value that happens to contain "@" mid-string (not as the very first
+    # character) must NOT be treated as a file reference
+    assert _parse_mass_assignment_fields("email=user@example.com") == [
+        ("email", "user@example.com")
+    ]
